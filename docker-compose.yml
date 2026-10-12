@@ -1,0 +1,17 @@
+# Production stack (e.g. paste into a Portainer stack).
+# Data lives in the named volume `supply-planner-data`; back it up to keep your library and trips.
+services:
+  supply-planner:
+    image: ouoertheo/supply-planner:latest
+    container_name: supply-planner
+    restart: unless-stopped
+    ports:
+      - "8085:8000"   # host:container — 8000 is used by Portainer's agent on this host
+    volumes:
+      - supply-planner-data:/data
+    environment:
+      # Optional: require "Authorization: Bearer <token>" on the /mcp endpoint.
+      MCP_TOKEN: ${MCP_TOKEN:-}
+
+volumes:
+  supply-planner-data:

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Supply Planner</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap/css/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script>
+    // Apply the color theme before first paint to avoid a flash.
+    document.documentElement.dataset.bsTheme =
+      matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  </script>
+</head>
+<body>
+  <nav class="navbar border-bottom d-lg-none px-3 app-topbar">
+    <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-controls="sidebar" aria-label="Open library">
+      <i class="bi bi-list"></i> Library
+    </button>
+    <span class="navbar-brand mb-0 h1 fs-6"><i class="bi bi-backpack2"></i> Supply Planner</span>
+  </nav>
+
+  <div class="app">
+    <aside class="offcanvas-lg offcanvas-start app-sidebar" tabindex="-1" id="sidebar" aria-labelledby="sidebarLabel">
+      <div class="offcanvas-header">
+        <h2 class="offcanvas-title h6" id="sidebarLabel">Library</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" data-bs-target="#sidebar" aria-label="Close"></button>
+      </div>
+      <div class="sidebar-inner">
+        <div class="brand d-none d-lg-flex"><i class="bi bi-backpack2"></i> Supply Planner</div>
+        <label class="form-label small text-body-secondary mb-1" for="currentUser">I am</label>
+        <select id="currentUser" class="form-select form-select-sm mb-3"></select>
+        <div id="library"></div>
+        <p class="sidebar-hint small text-body-secondary">Tip: drag entries onto the trip, use <i class="bi bi-plus-lg"></i> to add, right-click for more.</p>
+      </div>
+    </aside>
+
+    <main id="board" class="app-board" aria-live="polite"></main>
+  </div>
+
+  <ul class="dropdown-menu ctx-menu shadow" id="ctxMenu" role="menu"></ul>
+  <div id="modalHost"></div>
+  <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toasts"></div>
+
+  <script src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

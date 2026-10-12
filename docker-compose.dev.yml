@@ -1,0 +1,12 @@
+# Local build-and-run: docker compose -f docker-compose.dev.yml up --build
+services:
+  supply-planner:
+    build: .
+    image: ouoertheo/supply-planner:dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - supply-planner-dev-data:/data
+
+volumes:
+  supply-planner-dev-data:

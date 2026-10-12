@@ -1,0 +1,197 @@
+"""Domain models.
+
+Two layers:
+- Library objects (User, Category, Supply, StandardSet) are reusable definitions.
+- A Trip composes library objects by GUID and only stores trip-specific state
+  (member/category id lists and TripItems).
+"""
+
+from datetime import date
+from enum import StrEnum
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+UNCATEGORIZED_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def new_id() -> str:
+    return str(uuid4())
+
+
+def _clean_name(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("display_name must not be empty")
+    return value
+
+
+class Status(StrEnum):
+    OWNED = "owned"
+    NEEDED = "needed"
+
+
+class Entity(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(default_factory=new_id)
+    display_name: str
+
+    _clean = field_validator("display_name")(_clean_name)
+
+
+# --- Library -----------------------------------------------------------------
+
+
+class User(Entity):
+    email: str = ""
+
+
+class Category(Entity):
+    description: str = ""
+    builtin: bool = False
+
+
+class Supply(Entity):
+    default_category_id: str = UNCATEGORIZED_ID
+    default_count: int = Field(default=1, ge=1)
+    notes: str = ""
+    archived: bool = False
+
+
+class SetSupply(BaseModel):
+    supply_id: str
+    category_id: str
+    count: int = Field(default=1, ge=1)
+
+
+class StandardSet(Entity):
+    description: str = ""
+    category_ids: list[str] = Field(default_factory=list)
+    supplies: list[SetSupply] = Field(default_factory=list)
+
+
+# --- Trip --------------------------------------------------------------------
+
+
+class TripItem(BaseModel):
+    id: str = Field(default_factory=new_id)
+    supply_id: str
+    category_id: str
+    count: int = Field(default=1, ge=1)
+    status: Status = Status.NEEDED
+    packed: bool = False
+    owner_id: str | None = None
+    notes: str = ""
+
+
+class Trip(Entity):
+    description: str = ""
+    start_date: date | None = None
+    end_date: date | None = None
+    member_ids: list[str] = Field(default_factory=list)
+    category_ids: list[str] = Field(default_factory=list)
+    items: list[TripItem] = Field(default_factory=list)
+    version: int = 0
+    template_source_id: str | None = None
+
+
+# --- Request bodies ----------------------------------------------------------
+
+
+class UserIn(BaseModel):
+    display_name: str
+    email: str = ""
+
+
+class UserPatch(BaseModel):
+    display_name: str | None = None
+    email: str | None = None
+
+
+class CategoryIn(BaseModel):
+    display_name: str
+    description: str = ""
+
+
+class CategoryPatch(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+
+
+class SupplyIn(BaseModel):
+    display_name: str
+    default_category_id: str = UNCATEGORIZED_ID
+    default_count: int = Field(default=1, ge=1)
+    notes: str = ""
+
+
+class SupplyPatch(BaseModel):
+    display_name: str | None = None
+    default_category_id: str | None = None
+    default_count: int | None = Field(default=None, ge=1)
+    notes: str | None = None
+    archived: bool | None = None
+
+
+class StandardSetIn(BaseModel):
+    display_name: str
+    description: str = ""
+    category_ids: list[str] = Field(default_factory=list)
+    supplies: list[SetSupply] = Field(default_factory=list)
+
+
+class StandardSetPatch(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    category_ids: list[str] | None = None
+    supplies: list[SetSupply] | None = None
+
+
+class TripIn(BaseModel):
+    display_name: str
+    description: str = ""
+    start_date: date | None = None
+    end_date: date | None = None
+    member_ids: list[str] = Field(default_factory=list)
+
+
+class TripPatch(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+
+
+class CloneIn(BaseModel):
+    display_name: str
+    keep_members: bool = True
+    keep_owners: bool = False
+    reset_status_to_needed: bool = False
+
+
+class TripCategoryIn(BaseModel):
+    category_id: str | None = None
+    new_name: str | None = None
+
+
+class PackedIn(BaseModel):
+    packed: bool
+
+
+class ItemIn(BaseModel):
+    supply_id: str | None = None
+    new_name: str | None = None
+    category_id: str | None = None
+    count: int | None = Field(default=None, ge=1)
+    status: Status = Status.NEEDED
+    owner_id: str | None = None
+
+
+class ItemPatch(BaseModel):
+    count: int | None = Field(default=None, ge=1)
+    status: Status | None = None
+    packed: bool | None = None
+    owner_id: str | None = None
+    category_id: str | None = None
+    notes: str | None = None
