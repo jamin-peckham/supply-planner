@@ -511,6 +511,24 @@ def save_trip_as_standard_set(trip: str, name: str) -> dict[str, Any]:
         return {"id": sset.id, "name": sset.display_name, "supplies": len(sset.supplies), "categories": len(sset.category_ids)}
 
 
+@mcp.tool(annotations=WRITE)
+@_tool_errors
+def update_library_defaults(trip: str, category: str | None = None) -> dict[str, Any]:
+    """Set supplies' library default category to the category they sit in on this trip.
+
+    Pass a category to limit it to that card. Supplies on several cards are skipped as ambiguous.
+    """
+    db = get_db()
+    with db.lock:
+        t = _trip(db, trip)
+        cid = _resolve(db.categories, category, "category").id if category else None
+        result = svc.adopt_trip_categories(db, t.id, cid)
+        return {
+            "updated": [{"name": s.display_name, "default_category": _name(db.categories, s.default_category_id)} for s in result["updated"]],
+            "ambiguous": [s.display_name for s in result["ambiguous"]],
+        }
+
+
 # --- Library write tools -------------------------------------------------------
 
 

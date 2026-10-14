@@ -28,7 +28,7 @@ A collaborative trip supply planner. Build a **library** of reusable building bl
   - **Supply:** adds it to its default category, creating that card if needed.
   - **Standard set:** applies it to the trip.
 - **Drag and drop:** drag entries onto the board, or drop a supply at a specific spot in a card. Drag items to reorder them or to move them into another card; a line shows where they'll land. Drag a card by its header to reorder the cards.
-- **Right-click** any entry, card or item for more actions: edit, claim, owned/needed, remove, and template actions.
+- **Right-click** any entry, card or item for more actions: edit, claim, owned/needed, remove, and template actions. A card's **Update library defaults** makes that category the default for the supplies on it, so the library learns from how trips are organized.
 - **Cards and items** have a select checkbox and a remove button. Packed items are struck through. Click an item's **OWNED**/**NEEDED** badge to toggle it. Cards pack upward to fill gaps, masonry style.
 - **Selecting items:** tick items (or click a row; shift-click selects a range; a card's checkbox selects all its items). A bar then applies **Packed**, **Unpacked**, **Owned**, **Needed**, **Assign to…** or **Remove** to every selected item. Dragging a selected item moves the whole selection. **Esc** clears it.
 - **Identity:** pick yourself in **I am** (remembered per browser). There are no passwords; this is meant for a trusted network.
@@ -41,6 +41,7 @@ An [MCP](https://modelcontextprotocol.io) server is built in at `/mcp` (streamab
 - **Names or GUIDs:** every reference accepts either, and results use display names.
 - **Bulk operations:** `add_items` and `update_items` change many items in one call.
 - **Ordering:** `get_trip` lists cards and items in board order; `move_items` and `move_category` reorder them.
+- **`update_library_defaults`:** sets supplies' default category to the card they sit on in a trip (one card or the whole trip).
 - **`trip_gaps`:** reports what's needed, unassigned or unpacked, and who is bringing what.
 - **Templates:** `create_trip` can copy a template trip and apply standard sets in one call.
 

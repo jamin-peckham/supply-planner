@@ -10,6 +10,7 @@ from ..models import (
     ItemMoveIn,
     ItemPatch,
     PackedIn,
+    Supply,
     Trip,
     TripCategoryIn,
     TripIn,
@@ -81,6 +82,12 @@ def remove_category(trip_id: str, category_id: str) -> Trip:
 @router.put("/{trip_id}/categories/{category_id}/packed")
 def set_category_packed(trip_id: str, category_id: str, body: PackedIn) -> Trip:
     return svc.set_category_packed(get_db(), trip_id, category_id, body.packed)
+
+
+@router.post("/{trip_id}/categories/{category_id}/adopt-defaults")
+def adopt_defaults(trip_id: str, category_id: str) -> list[Supply]:
+    """Make this card the library default category for the supplies on it."""
+    return svc.adopt_trip_categories(get_db(), trip_id, category_id)["updated"]
 
 
 @router.post("/{trip_id}/items")

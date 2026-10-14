@@ -207,3 +207,14 @@ def test_add_item_at_position(client, make):
     assert _names(trip, supplies) == [("Pot", a["id"]), ("Tent", a["id"]), ("Stove", a["id"])]
     r = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": supplies[2]["id"], "category_id": b["id"], "before_id": stove})
     assert r.status_code == 400
+
+
+def test_adopt_defaults_from_card(client, make):
+    c1, c2 = make.category("A"), make.category("B")
+    stove, tent = make.supply("Stove", c1["id"]), make.supply("Tent", c2["id"])
+    t = make.trip()
+    for s in (stove, tent):
+        client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"], "category_id": c2["id"]})
+    updated = client.post(f"/api/trips/{t['id']}/categories/{c2['id']}/adopt-defaults").json()
+    assert [s["display_name"] for s in updated] == ["Stove"]  # Tent already defaulted to B
+    assert client.get(f"/api/supplies/{stove['id']}").json()["default_category_id"] == c2["id"]

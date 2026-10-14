@@ -8,7 +8,7 @@ import { showContextMenu } from './contextMenu.js';
 import { dropZone, makeDraggable, mark } from './dnd.js';
 import { confirmDialog, editItem, editTrip, formModal } from './modals.js';
 import { store } from './store.js';
-import { esc, initials, storage } from './ui.js';
+import { esc, initials, storage, toast } from './ui.js';
 
 const FILTERS = {
   all: { label: 'All', test: () => true },
@@ -389,6 +389,24 @@ async function removeMember(userId) {
   await tripCall('del', `/members/${userId}`);
 }
 
+/** Supplies on this card whose library default category is some other category. */
+function staleDefaults(categoryId) {
+  const ids = new Set(store.trip.items.filter((i) => i.category_id === categoryId).map((i) => i.supply_id));
+  return [...ids].map((id) => store.maps.supplies.get(id)).filter((s) => s && s.default_category_id !== categoryId);
+}
+
+async function setDefaultsFromCard(categoryId) {
+  const supplies = staleDefaults(categoryId);
+  if (!supplies.length) return;
+  const name = store.name('categories', categoryId);
+  const n = supplies.length;
+  const list = supplies.map((s) => s.display_name).join(', ');
+  if (!(await confirmDialog(`Set the library default category of ${n} suppl${n === 1 ? 'y' : 'ies'} to “${name}”? (${list})`, { title: 'Update library defaults', confirmLabel: 'Update', danger: false }))) return;
+  await api.post(`/trips/${store.trip.id}/categories/${categoryId}/adopt-defaults`);
+  await store.loadAll();
+  toast(`Updated ${n} suppl${n === 1 ? 'y' : 'ies'} to default to “${name}”.`, 'success');
+}
+
 function setCategoryPacked(categoryId) {
   const items = store.trip.items.filter((i) => i.category_id === categoryId);
   const allPacked = items.length > 0 && items.every((i) => i.packed);
@@ -472,6 +490,7 @@ function cardMenu(e, categoryId) {
   showContextMenu(e, [
     { label: allPacked ? 'Unpack all' : 'Pack all', icon: 'bi-check2-square', disabled: !items.length, action: () => setCategoryPacked(categoryId) },
     { label: 'Rename / edit category…', icon: 'bi-pencil', action: () => editEntity('category', categoryId) },
+    { label: 'Update library defaults', icon: 'bi-bookmark-check', disabled: !staleDefaults(categoryId).length, action: () => setDefaultsFromCard(categoryId) },
     'divider',
     { label: 'Remove from trip', icon: 'bi-trash', danger: true, action: () => removeCategory(categoryId) },
   ]);

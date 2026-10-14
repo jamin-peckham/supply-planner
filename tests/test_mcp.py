@@ -133,3 +133,17 @@ def test_move_items_and_categories(seeded):
     assert cats == {"Cooking": ["Pot"], "Shelter": ["Tent", "Stove"]}
     trip = call("move_category", trip="Lake", category="Shelter", before="Cooking")
     assert [c["category"] for c in trip["categories"]] == ["Shelter", "Cooking"]
+
+
+def test_update_library_defaults(seeded):
+    call("create_supply", name="Stove", default_category="Cooking")
+    call("create_supply", name="Rope", default_category="Misc")
+    call("add_items", trip="Lake", items=[
+        {"name": "Stove", "category": "Kitchen"},
+        {"name": "Rope", "category": "Kitchen"},
+        {"name": "Rope", "category": "Shelter"},
+    ])
+    result = call("update_library_defaults", trip="Lake")
+    assert result == {"updated": [{"name": "Stove", "default_category": "Kitchen"}], "ambiguous": ["Rope"]}
+    result = call("update_library_defaults", trip="Lake", category="Shelter")
+    assert result["updated"] == [{"name": "Rope", "default_category": "Shelter"}]

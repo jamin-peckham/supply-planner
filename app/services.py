@@ -256,6 +256,28 @@ def standard_set_from_trip(db: Database, trip_id: str, display_name: str | None)
         return db.standard_sets.save(_normalize_set(sset))
 
 
+def adopt_trip_categories(db: Database, trip_id: str, category_id: str | None = None) -> dict[str, list[Supply]]:
+    """Set each supply's library default category to the card it sits on in a trip.
+
+    Limited to one card when category_id is given. A supply that sits on several
+    cards (and no card was named) is ambiguous, so it is reported and left alone.
+    """
+    with db.lock:
+        trip = _require(db.trips, trip_id, "Trip")
+        cards: dict[str, set[str]] = {}
+        for item in trip.items:
+            if category_id is None or item.category_id == category_id:
+                cards.setdefault(item.supply_id, set()).add(item.category_id)
+        updated, ambiguous = [], []
+        for supply_id, cats in cards.items():
+            supply = _require(db.supplies, supply_id, "Supply")
+            if len(cats) > 1:
+                ambiguous.append(supply)
+            elif (cid := next(iter(cats))) != supply.default_category_id:
+                updated.append(db.supplies.save(supply.model_copy(update={"default_category_id": cid})))
+        return {"updated": updated, "ambiguous": ambiguous}
+
+
 # --- Trips -------------------------------------------------------------------
 
 
