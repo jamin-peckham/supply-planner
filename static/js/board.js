@@ -175,7 +175,10 @@ function layoutCard(el) {
 function initMasonry(grid) {
   masonryObserver.disconnect();
   grid.classList.add('is-masonry');
-  for (const el of grid.children) masonryObserver.observe(el);
+  for (const el of grid.children) {
+    layoutCard(el); // size now so the grid has its real height before scroll is restored
+    masonryObserver.observe(el);
+  }
 }
 
 // --- Selection -------------------------------------------------------------------
@@ -293,7 +296,9 @@ export function renderBoard() {
       : null;
 
   const trip = store.trip;
-  if (trip?.id !== selectionTripId) {
+  const scrollTop = root.scrollTop;
+  const sameTrip = trip?.id === selectionTripId;
+  if (!sameTrip) {
     selected.clear();
     anchorId = null;
     selectionTripId = trip?.id ?? null;
@@ -306,6 +311,7 @@ export function renderBoard() {
     return;
   }
   initMasonry(root.querySelector('.board-grid'));
+  if (sameTrip) root.scrollTop = scrollTop;
 
   root.querySelectorAll('.cat-card').forEach((card) => {
     const categoryId = card.dataset.categoryId;
@@ -329,7 +335,7 @@ export function renderBoard() {
     const input = root.querySelector(`.cat-card[data-category-id="${keep.cat}"] .quick-add input`);
     if (input) {
       input.value = keep.value;
-      input.focus();
+      input.focus({ preventScroll: true });
       input.setSelectionRange(keep.pos, keep.pos);
     }
   }
