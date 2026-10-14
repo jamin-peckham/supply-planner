@@ -15,6 +15,7 @@ from .models import (
     Category,
     CloneIn,
     ItemIn,
+    ItemMoveIn,
     ItemPatch,
     SetSupply,
     StandardSet,
@@ -259,10 +260,17 @@ def standard_set_from_trip(db: Database, trip_id: str, display_name: str | None)
 
 
 def _mutate_trip(db: Database, trip_id: str, fn: Callable[[Trip], Any]) -> Trip:
-    """Apply fn to a copy of the trip, bump its version and persist it."""
+    """Apply fn to a copy of the trip, bump its version and persist it.
+
+    A change that leaves the trip as it was (such as dropping an item back where
+    it came from) is not saved, so watching browsers don't refetch for nothing.
+    """
     with db.lock:
-        trip = _require(db.trips, trip_id, "Trip").model_copy(deep=True)
+        original = _require(db.trips, trip_id, "Trip")
+        trip = original.model_copy(deep=True)
         fn(trip)
+        if trip == original:
+            return original
         trip.version += 1
         return db.trips.save(Trip.model_validate(trip.model_dump()))
 
@@ -282,6 +290,32 @@ def _find_item(trip: Trip, item_id: str) -> TripItem:
     if item is None:
         raise NotFound(f"Item not found: {item_id}")
     return item
+
+
+def _place_items(trip: Trip, item_ids: list[str], category_id: str, before_id: str | None) -> None:
+    """Move items into a category, in front of `before_id` or at the end of its card.
+
+    Moved items keep their relative order from the trip.
+    """
+    wanted = set(item_ids)
+    for item_id in wanted:
+        _find_item(trip, item_id)
+    if before_id in wanted:
+        raise Invalid("An item can't be moved in front of itself")
+    moving = [i for i in trip.items if i.id in wanted]
+    rest = [i for i in trip.items if i.id not in wanted]
+    if before_id:
+        before = _find_item(trip, before_id)
+        if before.category_id != category_id:
+            raise Invalid("before_id must be an item in the target category")
+        index = rest.index(before)
+    else:
+        last = max((n for n, i in enumerate(rest) if i.category_id == category_id), default=len(rest) - 1)
+        index = last + 1
+    for item in moving:
+        item.category_id = category_id
+    trip.items = rest[:index] + moving + rest[index:]
+    _ensure_category(trip, category_id)
 
 
 def create_trip(db: Database, body: TripIn) -> Trip:
@@ -369,6 +403,23 @@ def remove_trip_category(db: Database, trip_id: str, category_id: str) -> Trip:
     return _mutate_trip(db, trip_id, apply)
 
 
+def move_trip_category(db: Database, trip_id: str, category_id: str, before_id: str | None) -> Trip:
+    """Reorder a category card: in front of `before_id`, or last."""
+
+    def apply(trip: Trip) -> None:
+        if category_id not in trip.category_ids:
+            raise NotFound(f"Category not on this trip: {category_id}")
+        if before_id == category_id:
+            return
+        if before_id and before_id not in trip.category_ids:
+            raise NotFound(f"Category not on this trip: {before_id}")
+        ids = [c for c in trip.category_ids if c != category_id]
+        ids.insert(ids.index(before_id) if before_id else len(ids), category_id)
+        trip.category_ids = ids
+
+    return _mutate_trip(db, trip_id, apply)
+
+
 def set_category_packed(db: Database, trip_id: str, category_id: str, packed: bool) -> Trip:
     def apply(trip: Trip) -> None:
         for item in trip.items:
@@ -381,13 +432,17 @@ def set_category_packed(db: Database, trip_id: str, category_id: str, packed: bo
 def add_item(db: Database, trip_id: str, body: ItemIn) -> Trip:
     """Add a supply to the trip. Unknown names become new library supplies.
 
-    Without an explicit category the supply's default category is used, and that
-    category is added to the trip if it isn't there yet.
+    Without an explicit category the supply's default category is used (or that of
+    `before_id`, the item it lands in front of), and that category is added to the
+    trip if it isn't there yet.
     """
     with db.lock:
-        _require(db.trips, trip_id, "Trip")
+        trip = _require(db.trips, trip_id, "Trip")
         if body.category_id:
             _require(db.categories, body.category_id, "Category")
+        before = _find_item(trip, body.before_id) if body.before_id else None
+        if before and body.category_id and before.category_id != body.category_id:
+            raise Invalid("before_id must be an item in the target category")
         if body.supply_id:
             supply = _require(db.supplies, body.supply_id, "Supply")
         elif body.new_name and body.new_name.strip():
@@ -397,7 +452,7 @@ def add_item(db: Database, trip_id: str, body: ItemIn) -> Trip:
         if body.owner_id:
             _require(db.users, body.owner_id, "User")
 
-        category_id = body.category_id or supply.default_category_id
+        category_id = body.category_id or (before and before.category_id) or supply.default_category_id
         if category_id not in db.categories:
             category_id = UNCATEGORIZED_ID
         item = TripItem(
@@ -413,6 +468,8 @@ def add_item(db: Database, trip_id: str, body: ItemIn) -> Trip:
             if item.owner_id:
                 _ensure_member(trip, item.owner_id)
             trip.items.append(item)
+            if body.before_id:
+                _place_items(trip, [item.id], category_id, body.before_id)
 
         return _mutate_trip(db, trip_id, apply)
 
@@ -432,13 +489,23 @@ def update_item(db: Database, trip_id: str, item_id: str, patch: ItemPatch) -> T
 
         def apply(trip: Trip) -> None:
             item = _find_item(trip, item_id)
+            old_category = item.category_id
             for key, value in changes.items():
                 setattr(item, key, value)
             if item.owner_id:
                 _ensure_member(trip, item.owner_id)
+            if item.category_id != old_category:
+                _place_items(trip, [item.id], item.category_id, None)  # lands at the end of its new card
             _ensure_category(trip, item.category_id)
 
         return _mutate_trip(db, trip_id, apply)
+
+
+def move_items(db: Database, trip_id: str, body: ItemMoveIn) -> Trip:
+    """Move items to a position in a category card (reorder and/or recategorize)."""
+    with db.lock:
+        _require(db.categories, body.category_id, "Category")
+        return _mutate_trip(db, trip_id, lambda t: _place_items(t, body.item_ids, body.category_id, body.before_id))
 
 
 def delete_item(db: Database, trip_id: str, item_id: str) -> Trip:

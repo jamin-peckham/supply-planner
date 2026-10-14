@@ -122,3 +122,14 @@ def test_http_endpoint_and_token(client, monkeypatch):
     assert r.status_code == 200
     # REST API stays open (token only guards MCP)
     assert client.get("/api/trips").status_code == 200
+
+
+def test_move_items_and_categories(seeded):
+    call("add_items", trip="Lake", items=[{"name": "Stove", "category": "Cooking"}, {"name": "Pot", "category": "Cooking"}, {"name": "Tent", "category": "Shelter"}])
+    trip = call("move_items", trip="Lake", items=["Pot"], before="Stove")
+    assert [i["name"] for i in trip["categories"][0]["items"]] == ["Pot", "Stove"]
+    trip = call("move_items", trip="Lake", items=["Stove"], category="Shelter")
+    cats = {c["category"]: [i["name"] for i in c["items"]] for c in trip["categories"]}
+    assert cats == {"Cooking": ["Pot"], "Shelter": ["Tent", "Stove"]}
+    trip = call("move_category", trip="Lake", category="Shelter", before="Cooking")
+    assert [c["category"] for c in trip["categories"]] == ["Shelter", "Cooking"]

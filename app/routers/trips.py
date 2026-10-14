@@ -1,9 +1,20 @@
-"""Trip endpoints. Every mutation bumps trip.version and returns the full trip."""
+"""Trip endpoints. Every change bumps trip.version and returns the full trip."""
 
 from fastapi import APIRouter
 
 from .. import services as svc
-from ..models import CloneIn, ItemIn, ItemPatch, PackedIn, Trip, TripCategoryIn, TripIn, TripPatch
+from ..models import (
+    CategoryMoveIn,
+    CloneIn,
+    ItemIn,
+    ItemMoveIn,
+    ItemPatch,
+    PackedIn,
+    Trip,
+    TripCategoryIn,
+    TripIn,
+    TripPatch,
+)
 from ..storage import get_db
 
 router = APIRouter(prefix="/api/trips")
@@ -57,6 +68,11 @@ def add_category(trip_id: str, body: TripCategoryIn) -> Trip:
     return svc.add_trip_category(get_db(), trip_id, body.category_id, body.new_name)
 
 
+@router.post("/{trip_id}/categories/move")
+def move_category(trip_id: str, body: CategoryMoveIn) -> Trip:
+    return svc.move_trip_category(get_db(), trip_id, body.category_id, body.before_id)
+
+
 @router.delete("/{trip_id}/categories/{category_id}")
 def remove_category(trip_id: str, category_id: str) -> Trip:
     return svc.remove_trip_category(get_db(), trip_id, category_id)
@@ -70,6 +86,11 @@ def set_category_packed(trip_id: str, category_id: str, body: PackedIn) -> Trip:
 @router.post("/{trip_id}/items")
 def add_item(trip_id: str, body: ItemIn) -> Trip:
     return svc.add_item(get_db(), trip_id, body)
+
+
+@router.post("/{trip_id}/items/move")
+def move_items(trip_id: str, body: ItemMoveIn) -> Trip:
+    return svc.move_items(get_db(), trip_id, body)
 
 
 @router.patch("/{trip_id}/items/{item_id}")

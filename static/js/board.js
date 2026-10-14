@@ -5,7 +5,7 @@
 import { addToTrip, cloneFrom, createEntity, editEntity, removeEntity, saveAsSet, tripCall } from './actions.js';
 import { api } from './api.js';
 import { showContextMenu } from './contextMenu.js';
-import { dropZone, makeDraggable } from './dnd.js';
+import { dropZone, makeDraggable, mark } from './dnd.js';
 import { confirmDialog, editItem, editTrip, formModal } from './modals.js';
 import { store } from './store.js';
 import { esc, initials, storage } from './ui.js';
@@ -123,7 +123,7 @@ function cardHtml(trip, categoryId) {
     ? shown.map(itemHtml).join('')
     : `<li class="item-empty">${all.length ? 'No items match the filter' : 'Drop supplies here'}</li>`;
   return `<article class="card cat-card${allPacked ? ' is-packed' : ''}" data-category-id="${categoryId}">
-    <div class="card-header">
+    <div class="card-header" draggable="true" data-drag-type="card" data-drag-id="${categoryId}" data-drag-name="${esc(name)}" data-drag-preview=".cat-card" title="Drag to reorder">
       <input class="form-check-input mt-0" type="checkbox" data-act="select-cat" ${shown.length ? '' : 'disabled'}
         title="Select all" aria-label="Select all in ${esc(name)}">
       <span class="cat-name">${esc(name)}</span>
@@ -286,6 +286,49 @@ function assignMenu(anchor) {
   ]);
 }
 
+// --- Reordering ------------------------------------------------------------------
+
+/** The item a drop at height `y` would land in front of (null = end of the card), skipping the items being moved. */
+function itemSlot(card, y, moving) {
+  const rows = [...card.querySelectorAll('.item[data-drag-id]')].filter((el) => !moving.includes(el.dataset.dragId));
+  return rows.find((el) => {
+    const r = el.getBoundingClientRect();
+    return y < r.top + r.height / 2;
+  }) ?? null;
+}
+
+/** Dropping a card on the left half of another lands in front of it, on the right half after it. */
+const dropsAfter = (card, x) => {
+  const r = card.getBoundingClientRect();
+  return x > r.left + r.width / 2;
+};
+
+function cardDropZone(card) {
+  const categoryId = card.dataset.categoryId;
+  // Dragging a selected item moves the whole selection; a supply from the sidebar moves nothing.
+  const moving = (p) => (p.type === 'supply' ? [] : selected.has(p.id) ? [...selected] : [p.id]);
+  dropZone(card, {
+    accepts: (p) => ['supply', 'item', 'card'].includes(p.type),
+    onOver: (p, e) => {
+      if (p.type === 'card') return mark(card, dropsAfter(card, e.clientX) ? 'drop-after' : 'drop-before');
+      const before = itemSlot(card, e.clientY, moving(p));
+      mark(before ?? card.querySelector('.items'), before ? 'drop-before' : 'drop-end');
+    },
+    onDrop: (p, e) => {
+      if (p.type !== 'card') {
+        const ids = moving(p);
+        const beforeId = itemSlot(card, e.clientY, ids)?.dataset.dragId ?? null;
+        return p.type === 'supply'
+          ? addToTrip('supply', p.id, { categoryId, beforeId })
+          : tripCall('post', '/items/move', { item_ids: ids, category_id: categoryId, before_id: beforeId });
+      }
+      const order = store.trip.category_ids;
+      const before = dropsAfter(card, e.clientX) ? order[order.indexOf(categoryId) + 1] : categoryId;
+      return tripCall('post', '/categories/move', { category_id: p.id, before_id: before ?? null });
+    },
+  });
+}
+
 export function renderBoard() {
   const root = board();
   // Keep focus and text in a quick-add box across background re-renders.
@@ -313,18 +356,7 @@ export function renderBoard() {
   initMasonry(root.querySelector('.board-grid'));
   if (sameTrip) root.scrollTop = scrollTop;
 
-  root.querySelectorAll('.cat-card').forEach((card) => {
-    const categoryId = card.dataset.categoryId;
-    // Dragging a selected item moves the whole selection.
-    const moving = (p) => (selected.has(p.id) ? [...selected] : [p.id]).filter((id) => findItem(id)?.category_id !== categoryId);
-    dropZone(card, {
-      accepts: (p) => p.type === 'supply' || (p.type === 'item' && moving(p).length > 0),
-      onDrop: (p) =>
-        p.type === 'supply'
-          ? addToTrip('supply', p.id, { categoryId })
-          : bulkApply(moving(p), (path) => api.patch(path, { category_id: categoryId })),
-    });
-  });
+  root.querySelectorAll('.cat-card').forEach(cardDropZone);
 
   // Drop selected ids that are gone or hidden by the filter.
   const shown = new Set(visibleIds());

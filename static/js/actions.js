@@ -57,7 +57,7 @@ export async function removeEntity(type, id) {
 }
 
 /** Put a library object onto the open trip. `categoryId` targets a specific card for supplies. */
-export async function addToTrip(type, id, { categoryId } = {}) {
+export async function addToTrip(type, id, { categoryId, beforeId } = {}) {
   if (type === 'trip') return store.openTrip(id);
   const trip = requireTrip();
   if (!trip) return;
@@ -71,7 +71,7 @@ export async function addToTrip(type, id, { categoryId } = {}) {
       updated = await api.post(`${base}/categories`, { category_id: id });
       break;
     case 'supply':
-      updated = await api.post(`${base}/items`, { supply_id: id, category_id: categoryId ?? null });
+      updated = await api.post(`${base}/items`, { supply_id: id, category_id: categoryId ?? null, before_id: beforeId ?? null });
       break;
     case 'set':
       updated = await api.post(`${base}/apply-set/${id}`);

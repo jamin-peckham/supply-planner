@@ -186,6 +186,18 @@ class ItemIn(BaseModel):
     count: int | None = Field(default=None, ge=1)
     status: Status = Status.NEEDED
     owner_id: str | None = None
+    before_id: str | None = None  # item to land in front of; None = end of the card
+
+
+class ItemMoveIn(BaseModel):
+    item_ids: list[str] = Field(min_length=1)
+    category_id: str
+    before_id: str | None = None  # item to land in front of; None = end of the card
+
+
+class CategoryMoveIn(BaseModel):
+    category_id: str
+    before_id: str | None = None  # card to land in front of; None = last
 
 
 class ItemPatch(BaseModel):

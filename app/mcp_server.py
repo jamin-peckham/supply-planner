@@ -29,6 +29,7 @@ from .models import (
     UNCATEGORIZED_ID,
     CloneIn,
     ItemIn,
+    ItemMoveIn,
     ItemPatch,
     Status,
     SupplyIn,
@@ -429,6 +430,41 @@ def update_items(trip: str, changes: list[ItemChange]) -> dict[str, Any]:
                 patch["category_id"] = _category_id(db, ch.category)
             t = svc.update_item(db, t.id, item_id, ItemPatch(**patch))
         return _trip_view(db, t)
+
+
+@mcp.tool(annotations=WRITE)
+@_tool_errors
+def move_items(trip: str, items: list[str], before: str | None = None, category: str | None = None) -> dict[str, Any]:
+    """Reorder items, or move them to a position in another category.
+
+    items: item ids or supply names that appear once; they keep their relative order.
+    before: the item to place them in front of; omit to put them at the end of the category.
+    category: target category (name or id; created if new). Defaults to the category
+    of `before`, else of the first item.
+    """
+    db = get_db()
+    with db.lock:
+        t = _trip(db, trip)
+        item_ids = [_item(db, t, ref) for ref in items]
+        before_id = _item(db, t, before) if before else None
+        if category:
+            category_id = _category_id(db, category)
+        else:
+            anchor = before_id or item_ids[0]
+            category_id = next(i.category_id for i in t.items if i.id == anchor)
+        return _trip_view(db, svc.move_items(db, t.id, ItemMoveIn(item_ids=item_ids, category_id=category_id, before_id=before_id)))
+
+
+@mcp.tool(annotations=WRITE)
+@_tool_errors
+def move_category(trip: str, category: str, before: str | None = None) -> dict[str, Any]:
+    """Reorder a trip's category cards: put `category` in front of `before`, or last if omitted."""
+    db = get_db()
+    with db.lock:
+        t = _trip(db, trip)
+        cid = _resolve(db.categories, category, "category").id
+        before_id = _resolve(db.categories, before, "category").id if before else None
+        return _trip_view(db, svc.move_trip_category(db, t.id, cid, before_id))
 
 
 @mcp.tool(annotations=REMOVE)

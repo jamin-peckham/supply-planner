@@ -130,3 +130,80 @@ def test_revision_changes_on_writes(client, make):
     before = client.get("/api/revision").json()["revision"]
     make.user()
     assert client.get("/api/revision").json()["revision"] > before
+
+
+def _names(trip, supplies):
+    by_id = {s["id"]: s["display_name"] for s in supplies}
+    return [(by_id[i["supply_id"]], i["category_id"]) for i in trip["items"]]
+
+
+def test_move_items_reorders_and_recategorizes(client, make):
+    a, b = make.category("A"), make.category("B")
+    supplies = [make.supply(n, a["id"]) for n in ("Stove", "Pot", "Fuel")] + [make.supply("Tent", b["id"])]
+    t = make.trip()
+    for s in supplies:
+        trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"]}).json()
+    stove, pot, fuel, tent = (i["id"] for i in trip["items"])
+    move = lambda **body: client.post(f"/api/trips/{t['id']}/items/move", json=body)
+
+    # within a card: Fuel in front of Stove
+    trip = move(item_ids=[fuel], category_id=a["id"], before_id=stove).json()
+    assert _names(trip, supplies)[:3] == [("Fuel", a["id"]), ("Stove", a["id"]), ("Pot", a["id"])]
+    version = trip["version"]
+
+    # dropping it where it already is changes nothing
+    trip = move(item_ids=[fuel], category_id=a["id"], before_id=stove).json()
+    assert trip["version"] == version
+
+    # several items to the end of another card keep their relative order
+    trip = move(item_ids=[pot, fuel], category_id=b["id"]).json()
+    assert _names(trip, supplies) == [("Stove", a["id"]), ("Tent", b["id"]), ("Fuel", b["id"]), ("Pot", b["id"])]
+
+    # into a category not yet on the trip adds the card
+    c = make.category("C")
+    trip = move(item_ids=[stove], category_id=c["id"]).json()
+    assert trip["category_ids"] == [a["id"], b["id"], c["id"]]
+
+    assert move(item_ids=[stove], category_id=a["id"], before_id=tent).status_code == 400
+    assert move(item_ids=[stove], category_id=c["id"], before_id=stove).status_code == 400
+    assert move(item_ids=["nope"], category_id=a["id"]).status_code == 404
+
+
+def test_patching_category_moves_item_to_end_of_card(client, make):
+    a, b = make.category("A"), make.category("B")
+    supplies = [make.supply("Stove", a["id"]), make.supply("Tent", b["id"])]
+    t = make.trip()
+    for s in supplies:
+        trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"]}).json()
+    stove = trip["items"][0]["id"]
+    trip = client.patch(f"/api/trips/{t['id']}/items/{stove}", json={"category_id": b["id"]}).json()
+    assert _names(trip, supplies) == [("Tent", b["id"]), ("Stove", b["id"])]
+
+
+def test_move_category(client, make):
+    a, b, c = make.category("A"), make.category("B"), make.category("C")
+    t = make.trip()
+    for cat in (a, b, c):
+        client.post(f"/api/trips/{t['id']}/categories", json={"category_id": cat["id"]})
+    move = lambda **body: client.post(f"/api/trips/{t['id']}/categories/move", json=body)
+    assert move(category_id=c["id"], before_id=a["id"]).json()["category_ids"] == [c["id"], a["id"], b["id"]]
+    assert move(category_id=c["id"]).json()["category_ids"] == [a["id"], b["id"], c["id"]]
+    version = move(category_id=b["id"], before_id=b["id"]).json()["version"]
+    assert move(category_id=b["id"], before_id=c["id"]).json()["version"] == version  # already there
+    d = make.category("D")
+    assert move(category_id=d["id"]).status_code == 404
+
+
+def test_add_item_at_position(client, make):
+    a, b = make.category("A"), make.category("B")
+    supplies = [make.supply("Stove", a["id"]), make.supply("Pot", a["id"]), make.supply("Tent", b["id"])]
+    t = make.trip()
+    trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": supplies[0]["id"]}).json()
+    stove = trip["items"][0]["id"]
+    trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": supplies[1]["id"], "before_id": stove}).json()
+    assert _names(trip, supplies) == [("Pot", a["id"]), ("Stove", a["id"])]
+    # without a category, the item joins the card of the one it lands in front of
+    trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": supplies[2]["id"], "before_id": stove}).json()
+    assert _names(trip, supplies) == [("Pot", a["id"]), ("Tent", a["id"]), ("Stove", a["id"])]
+    r = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": supplies[2]["id"], "category_id": b["id"], "before_id": stove})
+    assert r.status_code == 400
