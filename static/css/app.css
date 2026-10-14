@@ -60,6 +60,32 @@ body {
   margin-bottom: 1rem;
 }
 
+/* Collapsed sidebar (desktop): a narrow rail with just the logo and expand button. */
+@media (min-width: 992px) {
+  .sidebar-collapsed .app-sidebar {
+    width: 3.25rem;
+    flex-basis: 3.25rem;
+    overflow: hidden;
+  }
+
+  .sidebar-collapsed .sidebar-inner {
+    padding: 1rem 0.5rem;
+  }
+
+  .sidebar-collapsed .sidebar-inner > :not(.brand),
+  .sidebar-collapsed .brand-name {
+    display: none !important;
+  }
+
+  .sidebar-collapsed .brand {
+    flex-direction: column;
+  }
+
+  .sidebar-collapsed #sidebarToggle {
+    margin-left: 0 !important;
+  }
+}
+
 .app-board {
   flex: 1;
   min-width: 0;

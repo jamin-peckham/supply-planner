@@ -137,7 +137,24 @@ export function renderSidebar() {
   SECTIONS.forEach(renderList);
 }
 
+function initCollapseToggle() {
+  const btn = document.getElementById('sidebarToggle');
+  const sync = () => {
+    const collapsed = document.documentElement.classList.contains('sidebar-collapsed');
+    btn.innerHTML = `<i class="bi ${collapsed ? 'bi-chevron-double-right' : 'bi-chevron-double-left'}"></i>`;
+    btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-expanded', String(!collapsed));
+  };
+  btn.addEventListener('click', () => {
+    storage.set('sidebarCollapsed', document.documentElement.classList.toggle('sidebar-collapsed'));
+    sync();
+  });
+  sync();
+}
+
 export function initSidebar() {
+  initCollapseToggle();
   const root = document.getElementById('library');
   root.innerHTML = SECTIONS.map(
     (s) => `<section class="lib-section" data-section="${s.type}">

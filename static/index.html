@@ -11,6 +11,12 @@
     // Apply the color theme before first paint to avoid a flash.
     document.documentElement.dataset.bsTheme =
       matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    // Likewise restore a collapsed sidebar (desktop only; mobile uses the offcanvas).
+    try {
+      if (localStorage.getItem('supply-planner:sidebarCollapsed') === 'true') {
+        document.documentElement.classList.add('sidebar-collapsed');
+      }
+    } catch {}
   </script>
 </head>
 <body>
@@ -28,7 +34,10 @@
         <button type="button" class="btn-close" data-bs-dismiss="offcanvas" data-bs-target="#sidebar" aria-label="Close"></button>
       </div>
       <div class="sidebar-inner">
-        <div class="brand d-none d-lg-flex"><i class="bi bi-backpack2"></i> Supply Planner</div>
+        <div class="brand d-none d-lg-flex">
+          <i class="bi bi-backpack2"></i><span class="brand-name">Supply Planner</span>
+          <button type="button" class="btn btn-icon ms-auto" id="sidebarToggle"></button>
+        </div>
         <label class="form-label small text-body-secondary mb-1" for="currentUser">I am</label>
         <select id="currentUser" class="form-select form-select-sm mb-3"></select>
         <div id="library"></div>
