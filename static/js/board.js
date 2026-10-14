@@ -27,6 +27,10 @@ const selected = new Set();
 let selectionTripId = null;
 let anchorId = null; // last clicked item, for shift-click ranges
 
+// Reorder mode shows drag grips, for touch screens where HTML5 drag doesn't work.
+let reordering = false;
+const GRIP = '<span class="grip" data-grip data-act="grip" title="Drag to reorder" aria-hidden="true"><i class="bi bi-grip-vertical"></i></span>';
+
 // --- Rendering -----------------------------------------------------------------
 
 function emptyState() {
@@ -100,6 +104,7 @@ function itemHtml(item) {
   const supply = store.maps.supplies.get(item.supply_id);
   const name = supply?.display_name ?? '(deleted supply)';
   return `<li class="item${item.packed ? ' is-packed' : ''}" draggable="true" data-drag-type="item" data-drag-id="${item.id}" data-drag-name="${esc(name)}">
+    ${GRIP}
     <input class="form-check-input mt-0" type="checkbox" data-act="select-item" aria-label="Select ${esc(name)}">
     <span class="item-name" title="${esc(item.notes || name)}">${esc(name)}</span>
     ${item.packed ? '<i class="bi bi-check2 item-packed-icon" title="Packed"></i>' : ''}
@@ -124,6 +129,7 @@ function cardHtml(trip, categoryId) {
     : `<li class="item-empty">${all.length ? 'No items match the filter' : 'Drop supplies here'}</li>`;
   return `<article class="card cat-card${allPacked ? ' is-packed' : ''}" data-category-id="${categoryId}">
     <div class="card-header" draggable="true" data-drag-type="card" data-drag-id="${categoryId}" data-drag-name="${esc(name)}" data-drag-preview=".cat-card" title="Drag to reorder">
+      ${GRIP}
       <input class="form-check-input mt-0" type="checkbox" data-act="select-cat" ${shown.length ? '' : 'disabled'}
         title="Select all" aria-label="Select all in ${esc(name)}">
       <span class="cat-name">${esc(name)}</span>
@@ -155,7 +161,10 @@ function tripHtml(trip) {
         <small>or drag categories, supplies and sets here</small>
       </div>
     </div>
-    <div class="bulk-bar" role="toolbar" aria-label="Selected items" hidden></div>`;
+    <div class="board-footer">
+      ${reordering ? '<button type="button" class="btn btn-primary reorder-done" data-act="end-reorder"><i class="bi bi-check2"></i><span>Done</span></button>' : ''}
+      <div class="bulk-bar" role="toolbar" aria-label="Selected items" hidden></div>
+    </div>`;
 }
 
 // --- Masonry layout ----------------------------------------------------------------
@@ -345,9 +354,11 @@ export function renderBoard() {
     selected.clear();
     anchorId = null;
     selectionTripId = trip?.id ?? null;
+    reordering = false;
   }
   root.innerHTML = trip ? tripHtml(trip) : emptyState();
   root.classList.remove('has-selection');
+  root.classList.toggle('is-reordering', reordering);
   document.title = trip ? `${trip.display_name} · Supply Planner` : 'Supply Planner';
   if (!trip) {
     masonryObserver.disconnect();
@@ -445,10 +456,16 @@ async function addCategoryPrompt() {
   });
 }
 
+function setReordering(on) {
+  reordering = on;
+  renderBoard();
+}
+
 function tripMenu(anchor) {
   const trip = store.trip;
   showContextMenu(anchor, [
     { label: 'Edit trip…', icon: 'bi-pencil', action: () => editEntity('trip', trip.id) },
+    { label: reordering ? 'Done reordering' : 'Reorder', icon: 'bi-arrow-down-up', action: () => setReordering(!reordering) },
     { label: 'Use as template…', icon: 'bi-copy', action: () => cloneFrom(trip) },
     { label: 'Save as standard set…', icon: 'bi-collection', action: () => saveAsSet(trip) },
     { label: 'Close trip', icon: 'bi-x-circle', action: () => store.openTrip(null) },
@@ -563,6 +580,8 @@ export function initBoard() {
         return removeCategory(cardEl.dataset.categoryId);
       case 'add-category':
         return addCategoryPrompt();
+      case 'end-reorder':
+        return setReordering(false);
     }
   });
   root.addEventListener('keydown', (e) => {
@@ -571,7 +590,9 @@ export function initBoard() {
   document.addEventListener('keydown', (e) => {
     const typing = e.target.closest?.('input:not([type=checkbox]), textarea, select');
     const menuOpen = document.getElementById('ctxMenu').classList.contains('show');
-    if (e.key === 'Escape' && selected.size && !typing && !menuOpen && !document.querySelector('.modal.show')) clearSelection();
+    if (e.key !== 'Escape' || typing || menuOpen || document.querySelector('.modal.show')) return;
+    if (selected.size) clearSelection();
+    else if (reordering) setReordering(false);
   }, true); // capture: run before the context menu closes itself on the same Escape
   root.addEventListener('submit', (e) => {
     const form = e.target.closest('.quick-add');
@@ -587,6 +608,7 @@ export function initBoard() {
     }
   });
   root.addEventListener('contextmenu', (e) => {
+    if (e.target.closest('[data-grip]')) return e.preventDefault(); // a long press on a grip is a drag
     if (!store.trip || e.target.closest('input, textarea')) return;
     const itemEl = e.target.closest('.item');
     if (itemEl) {
