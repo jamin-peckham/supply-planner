@@ -7,7 +7,7 @@ def test_delete_user_clears_trips(client, make):
     client.post(f"/api/trips/{t['id']}/items", json={"new_name": "Rope", "owner_id": u["id"]})
     client.delete(f"/api/users/{u['id']}")
     trip = client.get(f"/api/trips/{t['id']}").json()
-    assert trip["member_ids"] == [] and trip["items"][0]["owner_id"] is None
+    assert trip["member_ids"] == [] and trip["items"][0]["contributions"] == []
 
 
 def test_delete_category_moves_everything_to_uncategorized(client, make):

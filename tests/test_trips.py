@@ -10,7 +10,7 @@ def test_add_item_uses_default_category_and_adds_card(client, make):
     assert trip["category_ids"] == [cat["id"]]
     assert trip["items"][0]["category_id"] == cat["id"]
     assert trip["items"][0]["count"] == 2
-    assert trip["items"][0]["status"] == "needed" and trip["items"][0]["packed"] is False
+    assert trip["items"][0]["contributions"] == [] and trip["items"][0]["per_person"] is False
     assert trip["version"] == 1
 
 
@@ -26,14 +26,65 @@ def test_add_item_by_new_name_creates_library_supply(client, make):
     assert len(client.get("/api/supplies").json()) == 1
 
 
-def test_same_supply_can_appear_twice(client, make):
+def test_adding_supply_again_adds_a_claim_not_a_row(client, make):
     s = make.supply("Stove")
     a, b = make.user("A"), make.user("B")
     t = make.trip()
-    client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"], "owner_id": a["id"]})
+    trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"], "owner_id": a["id"]}).json()
+    assert trip["items"][0]["contributions"] == [{"owner_id": a["id"], "count": 1, "status": "needed", "packed": False}]
     trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"], "owner_id": b["id"]}).json()
-    assert len(trip["items"]) == 2
+    assert len(trip["items"]) == 1
+    item = trip["items"][0]
+    assert [c["owner_id"] for c in item["contributions"]] == [a["id"], b["id"]]
+    assert item["count"] == 2  # the target grows to cover both
     assert set(trip["member_ids"]) == {a["id"], b["id"]}  # owners join automatically
+    # without an owner, adding it again changes nothing
+    assert client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"]}).json()["version"] == trip["version"]
+
+
+def test_contributions_split_an_item(client, make):
+    s = make.supply("Water", default_count=6)
+    a, b = make.user("A"), make.user("B")
+    t = make.trip()
+    trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"]}).json()
+    item_id = trip["items"][0]["id"]
+    put = lambda user, **body: client.put(f"/api/trips/{t['id']}/items/{item_id}/contributions/{user['id']}", json=body)
+
+    # a new claim defaults to what is still missing
+    trip = put(a, count=4).json()
+    trip = put(b).json()
+    shares = {c["owner_id"]: c["count"] for c in trip["items"][0]["contributions"]}
+    assert shares == {a["id"]: 4, b["id"]: 2}
+    assert set(trip["member_ids"]) == {a["id"], b["id"]}
+
+    # packing implies owned; marking needed unpacks
+    c = put(a, packed=True).json()["items"][0]["contributions"][0]
+    assert c["packed"] is True and c["status"] == "owned" and c["count"] == 4
+    c = put(a, status="needed").json()["items"][0]["contributions"][0]
+    assert c["packed"] is False and c["status"] == "needed"
+
+    trip = client.delete(f"/api/trips/{t['id']}/items/{item_id}/contributions/{a['id']}").json()
+    assert [c["owner_id"] for c in trip["items"][0]["contributions"]] == [b["id"]]
+    assert client.delete(f"/api/trips/{t['id']}/items/{item_id}/contributions/{a['id']}").status_code == 404
+
+    # PATCH replaces them all, merging duplicates per person
+    trip = client.patch(
+        f"/api/trips/{t['id']}/items/{item_id}",
+        json={"contributions": [{"owner_id": a["id"], "count": 1}, {"owner_id": a["id"], "count": 2, "packed": True}]},
+    ).json()
+    assert trip["items"][0]["contributions"] == [{"owner_id": a["id"], "count": 3, "status": "needed", "packed": False}]
+
+
+def test_per_person_items(client, make):
+    s = client.post("/api/supplies", json={"display_name": "Sleeping bag", "per_person": True}).json()
+    a, b = make.user("A"), make.user("B")
+    t = make.trip(member_ids=[a["id"], b["id"]])
+    trip = client.post(f"/api/trips/{t['id']}/items", json={"supply_id": s["id"]}).json()
+    item = trip["items"][0]
+    assert item["per_person"] is True
+    # a per-person claim is one each
+    trip = client.put(f"/api/trips/{t['id']}/items/{item['id']}/contributions/{a['id']}", json={}).json()
+    assert trip["items"][0]["contributions"][0]["count"] == 1
 
 
 def test_move_item_and_pack(client, make):
@@ -45,10 +96,12 @@ def test_move_item_and_pack(client, make):
     trip = client.patch(f"/api/trips/{t['id']}/items/{item_id}", json={"category_id": c2["id"]}).json()
     assert trip["items"][0]["category_id"] == c2["id"]
     assert c2["id"] in trip["category_ids"]
+    u = make.user()
+    client.put(f"/api/trips/{t['id']}/items/{item_id}/contributions/{u['id']}", json={})
     trip = client.put(f"/api/trips/{t['id']}/categories/{c2['id']}/packed", json={"packed": True}).json()
-    assert trip["items"][0]["packed"] is True
-    trip = client.patch(f"/api/trips/{t['id']}/items/{item_id}", json={"owner_id": None, "status": "owned"}).json()
-    assert trip["items"][0]["status"] == "owned"
+    assert trip["items"][0]["contributions"][0]["packed"] is True
+    trip = client.patch(f"/api/trips/{t['id']}/items/{item_id}", json={"status": "needed"}).json()
+    assert trip["items"][0]["contributions"] == [{"owner_id": u["id"], "count": 1, "status": "needed", "packed": False}]
 
 
 def test_remove_category_removes_its_items(client, make):
@@ -81,7 +134,7 @@ def test_members(client, make):
     assert trip["member_ids"] == [u["id"]]
     trip = client.post(f"/api/trips/{t['id']}/items", json={"new_name": "Rope", "owner_id": u["id"]}).json()
     trip = client.delete(f"/api/trips/{t['id']}/members/{u['id']}").json()
-    assert trip["member_ids"] == [] and trip["items"][0]["owner_id"] is None
+    assert trip["member_ids"] == [] and trip["items"][0]["contributions"] == []
 
 
 def test_clone_trip(client, make):
@@ -98,7 +151,13 @@ def test_clone_trip(client, make):
     assert clone["member_ids"] == [u["id"]]
     item = clone["items"][0]
     assert item["id"] != trip["items"][0]["id"]
-    assert item["owner_id"] is None and item["status"] == "needed" and item["packed"] is False
+    assert item["contributions"] == []
+
+    kept = client.post(
+        f"/api/trips/{t['id']}/clone",
+        json={"display_name": "Lake 3", "keep_owners": True, "reset_status_to_needed": True},
+    ).json()
+    assert kept["items"][0]["contributions"] == [{"owner_id": u["id"], "count": 1, "status": "needed", "packed": False}]
 
 
 def test_apply_set_and_save_as_set(client, make):

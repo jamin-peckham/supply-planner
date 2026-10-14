@@ -36,24 +36,47 @@ def test_create_trip_and_add_items_by_name(seeded):
     )
     cats = {c["category"]: c["items"] for c in trip["categories"]}
     assert set(cats) == {"Cooking", "Shelter"}
-    assert [(i["name"], i["count"], i["owner"]) for i in cats["Cooking"]] == [("Stove", 2, "Bob"), ("Stove", 1, "Alice Smith")]
+    [stove] = cats["Cooking"]  # the second Stove became Alice's claim on the same item
+    assert (stove["target"], stove["covered"]) == (3, 3)
+    assert [(b["who"], b["count"]) for b in stove["bringing"]] == [("Bob", 2), ("Alice Smith", 1)]
+    assert cats["Shelter"][0]["bringing"] == [] and cats["Shelter"][0]["short"] == 1
     assert set(trip["members"]) == {"Alice Smith", "Bob"}  # owners join
     # library remembers new supplies/categories
     assert [s["name"] for s in call("search_library", kind="supplies")] == ["Stove", "Tent"]
 
 
-def test_update_items_by_name_and_ambiguity(seeded):
-    call("add_items", trip="Lake", items=[{"name": "Tent"}, {"name": "Stove"}, {"name": "Stove"}])
-    trip = call("update_items", trip="Lake", changes=[{"item": "Tent", "packed": True, "owner": "Bob", "status": "owned"}])
-    tent = next(i for c in trip["categories"] for i in c["items"] if i["name"] == "Tent")
-    assert tent["packed"] and tent["owner"] == "Bob" and tent["status"] == "owned"
+def _find(trip, name):
+    return next(i for c in trip["categories"] for i in c["items"] if i["name"] == name)
+
+
+def test_update_items_splits_and_ambiguity(seeded):
+    call("add_items", trip="Lake", items=[{"name": "Water", "count": 6}, {"name": "Stove"}, {"name": "Stove", "category": "Cooking"}])
+    trip = call("update_items", trip="Lake", changes=[{"item": "Water", "bringing": [{"who": "Alice Smith", "count": 4}, {"who": "Bob"}]}])
+    water = _find(trip, "Water")
+    assert [(b["who"], b["count"]) for b in water["bringing"]] == [("Alice Smith", 4), ("Bob", 2)]
+    assert water["short"] == 0 and not water["packed"]
+
+    trip = call("update_items", trip="Lake", changes=[{"item": "Water", "packed": True}])
+    water = _find(trip, "Water")
+    assert water["packed"] and all(b["status"] == "owned" for b in water["bringing"])
+
+    trip = call("update_items", trip="Lake", changes=[{"item": "Water", "bringing": [{"who": "Bob", "count": 0}]}])
+    assert _find(trip, "Water")["short"] == 2
 
     with pytest.raises(ToolError, match="appears 2 times"):
         call("update_items", trip="Lake", changes=[{"item": "Stove", "packed": True}])
 
-    trip = call("update_items", trip="Lake", changes=[{"item": "Tent", "owner": "none"}])
-    tent = next(i for c in trip["categories"] for i in c["items"] if i["name"] == "Tent")
-    assert tent["owner"] is None
+
+def test_per_person_items(seeded):
+    call("create_supply", name="Sleeping bag", per_person=True)
+    trip = call("add_items", trip="Lake", items=[{"name": "Sleeping bag"}])
+    bag = _find(trip, "Sleeping bag")
+    assert bag["per_person"] and bag["target"] == 1  # one member so far
+    trip = call("update_trip", trip="Lake", add_members=["Bob"])
+    assert _find(trip, "Sleeping bag")["target"] == 2
+    call("update_items", trip="Lake", changes=[{"item": "Sleeping bag", "bringing": [{"who": "Bob"}]}])
+    gaps = call("trip_gaps", trip="Lake")
+    assert gaps["short"] == [{"name": "Sleeping bag", "category": "Uncategorized", "missing": 1, "missing_people": ["Alice Smith"]}]
 
 
 def test_errors_are_readable(seeded):
@@ -64,21 +87,21 @@ def test_errors_are_readable(seeded):
 
 
 def test_gaps_sets_and_templates(seeded):
-    call("add_items", trip="Lake", items=[{"name": "Rope", "owner": "Bob"}, {"name": "Map", "status": "owned"}])
+    call("add_items", trip="Lake", items=[{"name": "Rope", "owner": "Bob"}, {"name": "Map", "owner": "Alice Smith", "status": "owned"}, {"name": "Tarp"}])
     call("add_categories", trip="Lake", categories=["First Aid"])
     gaps = call("trip_gaps", trip="Lake")
-    assert [i["name"] for i in gaps["needed"]] == ["Rope"]
-    assert [i["name"] for i in gaps["unassigned"]] == ["Map"]
+    assert gaps["to_buy"] == ["Rope (Bob)"]
+    assert [i["name"] for i in gaps["short"]] == ["Tarp"]
     assert gaps["empty_categories"] == ["First Aid"]
-    assert gaps["bringing_by_person"] == {"Alice Smith": [], "Bob": ["Rope"]}
+    assert gaps["bringing_by_person"] == {"Alice Smith": ["Map (owned)"], "Bob": ["Rope (needed)"]}
 
     call("save_trip_as_standard_set", trip="Lake", name="Basics")
     new = call("create_trip", name="River", template_trip="Lake", start_date="2027-06-01")
     assert new["start_date"] == "2027-06-01"
-    assert new["totals"]["items"] == 2 and new["totals"]["unassigned"] == 2
+    assert new["totals"]["items"] == 3 and new["totals"]["short"] == 3
 
     empty = call("create_trip", name="Beach", standard_sets=["Basics"])
-    assert empty["totals"]["items"] == 2
+    assert empty["totals"]["items"] == 3
 
 
 def test_remove_and_rename(seeded):
@@ -96,10 +119,11 @@ def test_trip_resource_markdown(seeded):
     from app.mcp_server import trip_markdown
     from app.storage import get_db
 
-    call("add_items", trip="Lake", items=[{"name": "Tent", "category": "Shelter", "count": 2}])
+    call("add_items", trip="Lake", items=[{"name": "Tent", "category": "Shelter", "count": 2}, {"name": "Stove", "owner": "Bob"}])
     db = get_db()
     md = trip_markdown(db, db.trips.all()[0])
-    assert "# Lake" in md and "## Shelter" in md and "- [ ] Tent ×2 (needed)" in md
+    assert "# Lake" in md and "## Shelter" in md and "- [ ] Tent 0/2 — unclaimed" in md
+    assert "- [ ] Stove 1/1 — Bob (needed)" in md
 
 
 INIT = {

@@ -399,10 +399,6 @@ body {
   background: var(--bs-primary-bg-subtle);
 }
 
-.item-packed-icon {
-  color: var(--bs-success);
-}
-
 .item-name {
   flex: 1;
   min-width: 0;
@@ -417,41 +413,104 @@ body {
 }
 
 .item-count {
-  font-size: 0.8rem;
-  color: var(--bs-secondary-color);
+  font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.item-meta {
+.item-count .bi {
+  margin-right: 0.15rem;
+}
+
+.item-count.is-met {
+  color: var(--bs-secondary-color);
+}
+
+.item-count.is-short {
+  color: var(--bs-warning-text-emphasis);
+  font-weight: 600;
+}
+
+/* People bringing an item. Dashed = still to get, filled = has it, green = packed. */
+.chips {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.2rem;
+  flex: none;
 }
 
-.status-badge {
-  cursor: pointer;
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.35rem;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--bs-border-color);
+  background: var(--bs-secondary-bg);
+  color: var(--bs-body-color);
   font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 0.1rem 0.35rem;
-  border-radius: 0.25rem;
-  border: 1px solid;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
 }
 
-.status-badge:hover {
-  filter: brightness(0.92);
+.chip:hover {
+  filter: brightness(0.94);
 }
 
-.status-needed {
-  color: var(--bs-warning-text-emphasis);
-  background: var(--bs-warning-bg-subtle);
+.chip-n {
+  font-weight: 400;
+}
+
+.chip .bi-check-lg {
+  font-size: 0.75rem;
+}
+
+.chip-needed {
+  border-style: dashed;
   border-color: var(--bs-warning-border-subtle);
+  background: var(--bs-warning-bg-subtle);
+  color: var(--bs-warning-text-emphasis);
 }
 
-.status-owned {
-  color: var(--bs-success-text-emphasis);
-  background: var(--bs-success-bg-subtle);
+.chip-packed {
   border-color: var(--bs-success-border-subtle);
+  background: var(--bs-success-bg-subtle);
+  color: var(--bs-success-text-emphasis);
+}
+
+/* An empty per-person slot: this member hasn't claimed theirs. */
+.chip-slot {
+  border-style: dashed;
+  background: transparent;
+  color: var(--bs-tertiary-color);
+  font-weight: 400;
+}
+
+.chip.is-me {
+  box-shadow: 0 0 0 2px var(--bs-primary-border-subtle);
+}
+
+.chip-claim,
+.chip-more {
+  background: transparent;
+  color: var(--bs-secondary-color);
+  font-weight: 400;
+}
+
+.chip-claim {
+  border-style: dashed;
+}
+
+@media (pointer: coarse) {
+  .chip {
+    min-width: 1.9rem;
+    height: 1.9rem;
+    font-size: 0.75rem;
+  }
 }
 
 .item-empty {
@@ -666,6 +725,10 @@ body {
 
 .set-count {
   max-width: 5rem;
+}
+
+.contrib-status {
+  max-width: 7rem;
 }
 
 .check-list {

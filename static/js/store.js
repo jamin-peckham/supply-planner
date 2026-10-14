@@ -114,3 +114,20 @@ export const store = {
     });
   },
 };
+
+// --- Trip item arithmetic ----------------------------------------------------------
+// An item needs `count` (or one per member when per_person); contributions say who
+// brings how many, each with its own status and packed flag.
+
+export const target = (trip, item) => (item.per_person ? trip.member_ids.length : item.count);
+export const covered = (item) => item.contributions.reduce((n, c) => n + c.count, 0);
+export const isShort = (trip, item) => covered(item) < target(trip, item);
+export const contributionOf = (item, userId) => item.contributions.find((c) => c.owner_id === userId) ?? null;
+
+/** Fully packed: enough people claimed it and every claim is packed. */
+export const isPacked = (trip, item) =>
+  item.contributions.length > 0 && !isShort(trip, item) && item.contributions.every((c) => c.packed);
+
+/** Members who haven't claimed their own one of a per-person item. */
+export const openSlots = (trip, item) =>
+  item.per_person ? trip.member_ids.filter((id) => !contributionOf(item, id)) : [];

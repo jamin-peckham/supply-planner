@@ -1,20 +1,26 @@
 // Main screen: the open trip as a grid of category cards.
-// Cards and items each show two direct controls (select checkbox, remove). Selected
-// items get bulk actions (pack, owned, assign…) from the bar at the bottom;
+// Cards and items each show two direct controls (select checkbox, remove). An item's
+// chips are the people bringing it: tap one to pack it, + to claim it yourself.
+// Selected items get bulk actions (pack, owned, assign…) from the bar at the bottom;
 // everything else lives in the right-click menu or the edit modal.
 import { addToTrip, cloneFrom, createEntity, editEntity, removeEntity, saveAsSet, tripCall } from './actions.js';
 import { api } from './api.js';
 import { showContextMenu } from './contextMenu.js';
 import { dropZone, makeDraggable, mark } from './dnd.js';
 import { confirmDialog, editItem, editTrip, formModal } from './modals.js';
-import { store } from './store.js';
+import { contributionOf, covered, isPacked, isShort, openSlots, store, target } from './store.js';
 import { esc, initials, storage, toast } from './ui.js';
+
+const me = () => store.currentUserId;
+const mine = (item) => (me() ? contributionOf(item, me()) : null);
 
 const FILTERS = {
   all: { label: 'All', test: () => true },
-  needed: { label: 'Needed', test: (i) => i.status === 'needed' },
-  mine: { label: 'Mine', test: (i) => !!store.currentUserId && i.owner_id === store.currentUserId },
-  unpacked: { label: 'Unpacked', test: (i) => !i.packed },
+  // Short on claims, or someone still has to get theirs.
+  needed: { label: 'Needed', test: (i) => isShort(store.trip, i) || i.contributions.some((c) => c.status === 'needed') },
+  // What I'm bringing, plus my empty slot on per-person items.
+  mine: { label: 'Mine', test: (i) => !!mine(i) || openSlots(store.trip, i).includes(me()) },
+  unpacked: { label: 'Unpacked', test: (i) => !isPacked(store.trip, i) },
 };
 let filter = storage.get('boardFilter', 'all');
 if (!FILTERS[filter]) filter = 'all';
@@ -56,8 +62,8 @@ function emptyState() {
 
 function headerHtml(trip) {
   const total = trip.items.length;
-  const packed = trip.items.filter((i) => i.packed).length;
-  const needed = trip.items.filter((i) => i.status === 'needed').length;
+  const packed = trip.items.filter((i) => isPacked(trip, i)).length;
+  const needed = trip.items.filter(FILTERS.needed.test).length;
   const pct = total ? Math.round((packed / total) * 100) : 0;
   const me = store.currentUserId;
   const dates = [trip.start_date, trip.end_date].filter(Boolean).join(' → ');
@@ -98,22 +104,61 @@ function headerHtml(trip) {
   </header>`;
 }
 
-function itemHtml(item) {
-  const owner = item.owner_id ? store.name('users', item.owner_id) : null;
-  const mine = item.owner_id && item.owner_id === store.currentUserId;
+// More chips than this collapse into a "+N" chip that opens the editor.
+const MAX_CHIPS = 3;
+
+const STATE_TEXT = { packed: 'packed', owned: 'has it', needed: 'still has to get it' };
+
+function chipHtml(item, c) {
+  const who = store.name('users', c.owner_id);
+  const state = c.packed ? 'packed' : c.status;
+  const n = c.count > 1 && !item.per_person ? `<span class="chip-n">×${c.count}</span>` : '';
+  const title = `${who}${c.count > 1 ? ` ×${c.count}` : ''}: ${STATE_TEXT[state]}. Tap to ${c.packed ? 'unpack' : 'pack'}.`;
+  return `<button type="button" class="chip chip-${state}${c.owner_id === me() ? ' is-me' : ''}" data-act="chip" data-user="${c.owner_id}"
+    title="${esc(title)}" aria-label="${esc(title)}">${esc(initials(who))}${n}${c.packed ? '<i class="bi bi-check-lg"></i>' : ''}</button>`;
+}
+
+function slotHtml(userId) {
+  const who = store.name('users', userId);
+  const title = `${who} hasn't claimed theirs yet. Tap to claim.`;
+  return `<button type="button" class="chip chip-slot${userId === me() ? ' is-me' : ''}" data-act="slot" data-user="${userId}"
+    title="${esc(title)}" aria-label="${esc(title)}">${esc(initials(who))}</button>`;
+}
+
+/** The people bringing an item (me first), empty per-person slots, and a claim button. */
+function chipsHtml(trip, item) {
+  const meFirst = (a, b) => (b === me()) - (a === me());
+  const chips = [
+    ...[...item.contributions].sort((a, b) => meFirst(a.owner_id, b.owner_id)).map((c) => chipHtml(item, c)),
+    ...openSlots(trip, item).sort(meFirst).map(slotHtml),
+  ];
+  const shown = chips.length > MAX_CHIPS + 1 ? chips.slice(0, MAX_CHIPS) : chips;
+  const more = chips.length - shown.length;
+  // Per-person items are claimed through your own slot; elsewhere + adds you.
+  const canClaim = !mine(item) && !openSlots(trip, item).includes(me());
+  return `<span class="chips">${shown.join('')}${
+    more ? `<button type="button" class="chip chip-more" data-act="edit-item" title="Show everyone">+${more}</button>` : ''
+  }${canClaim ? '<button type="button" class="chip chip-claim" data-act="claim" title="I\'ll bring this" aria-label="I\'ll bring this"><i class="bi bi-plus-lg"></i></button>' : ''}</span>`;
+}
+
+function itemHtml(trip, item) {
   const supply = store.maps.supplies.get(item.supply_id);
   const name = supply?.display_name ?? '(deleted supply)';
-  return `<li class="item${item.packed ? ' is-packed' : ''}" draggable="true" data-drag-type="item" data-drag-id="${item.id}" data-drag-name="${esc(name)}">
+  const need = target(trip, item);
+  const have = covered(item);
+  // A fraction only when it says something: a count above one, per-person, or not yet claimed.
+  const fraction =
+    item.per_person || need > 1 || have < need
+      ? `<span class="item-count ${have < need ? 'is-short' : 'is-met'}" title="${have} of ${need} claimed${item.per_person ? ' (one per person)' : ''}">${
+          item.per_person ? '<i class="bi bi-people"></i>' : ''
+        }${have}/${need}</span>`
+      : '';
+  return `<li class="item${isPacked(trip, item) ? ' is-packed' : ''}" draggable="true" data-drag-type="item" data-drag-id="${item.id}" data-drag-name="${esc(name)}">
     ${GRIP}
     <input class="form-check-input mt-0" type="checkbox" data-act="select-item" aria-label="Select ${esc(name)}">
     <span class="item-name" title="${esc(item.notes || name)}">${esc(name)}</span>
-    ${item.packed ? '<i class="bi bi-check2 item-packed-icon" title="Packed"></i>' : ''}
-    ${item.count > 1 ? `<span class="item-count">×${item.count}</span>` : ''}
-    <span class="item-meta">
-      <button type="button" class="status-badge status-${item.status}" data-act="toggle-status"
-        title="Mark ${item.status === 'needed' ? 'owned' : 'needed'}">${item.status}</button>
-      ${owner ? `<span class="avatar avatar-sm${mine ? ' is-me' : ''}" title="${esc(owner)}">${esc(initials(owner))}</span>` : ''}
-    </span>
+    ${fraction}
+    ${chipsHtml(trip, item)}
     <button type="button" class="btn btn-icon" data-act="remove-item" title="Remove from trip" aria-label="Remove ${esc(name)}"><i class="bi bi-x-lg"></i></button>
   </li>`;
 }
@@ -121,11 +166,11 @@ function itemHtml(item) {
 function cardHtml(trip, categoryId) {
   const all = trip.items.filter((i) => i.category_id === categoryId);
   const shown = all.filter(FILTERS[filter].test);
-  const packed = all.filter((i) => i.packed).length;
+  const packed = all.filter((i) => isPacked(trip, i)).length;
   const allPacked = all.length > 0 && packed === all.length;
   const name = store.name('categories', categoryId);
   const body = shown.length
-    ? shown.map(itemHtml).join('')
+    ? shown.map((i) => itemHtml(trip, i)).join('')
     : `<li class="item-empty">${all.length ? 'No items match the filter' : 'Drop supplies here'}</li>`;
   return `<article class="card cat-card${allPacked ? ' is-packed' : ''}" data-category-id="${categoryId}">
     <div class="card-header" draggable="true" data-drag-type="card" data-drag-id="${categoryId}" data-drag-name="${esc(name)}" data-drag-preview=".cat-card" title="Drag to reorder">
@@ -196,16 +241,22 @@ function selectedItems() {
   return store.trip ? store.trip.items.filter((i) => selected.has(i.id)) : [];
 }
 
+// In the Mine view, pack/owned/needed apply to my share only; elsewhere to everyone's.
+const mineOnly = () => filter === 'mine' && !!me();
+const scopedClaims = (items) => items.flatMap((i) => (mineOnly() ? [mine(i)].filter(Boolean) : i.contributions));
+
 function bulkBarHtml(items) {
   const n = items.length;
+  const claims = scopedClaims(items);
+  const none = (test) => !claims.some(test);
   const btn = (act, icon, label, disabled = false, cls = 'btn-outline-secondary') =>
     `<button type="button" class="btn btn-sm ${cls}" data-act="${act}"${disabled ? ' disabled' : ''}><i class="bi ${icon}"></i><span>${label}</span></button>`;
-  return `<span class="bulk-count"><strong>${n}</strong> selected</span>
+  return `<span class="bulk-count"><strong>${n}</strong> selected${mineOnly() ? ' · your share' : ''}</span>
     <div class="bulk-actions">
-      ${btn('bulk-pack', 'bi-check2-square', 'Packed', items.every((i) => i.packed))}
-      ${btn('bulk-unpack', 'bi-square', 'Unpacked', items.every((i) => !i.packed))}
-      ${btn('bulk-owned', 'bi-bag-check', 'Owned', items.every((i) => i.status === 'owned'))}
-      ${btn('bulk-needed', 'bi-bag', 'Needed', items.every((i) => i.status === 'needed'))}
+      ${btn('bulk-pack', 'bi-check2-square', 'Packed', none((c) => !c.packed))}
+      ${btn('bulk-unpack', 'bi-square', 'Unpacked', none((c) => c.packed))}
+      ${btn('bulk-owned', 'bi-bag-check', 'Owned', none((c) => c.status !== 'owned'))}
+      ${btn('bulk-needed', 'bi-bag', 'Needed', none((c) => c.status !== 'needed'))}
       ${btn('bulk-assign', 'bi-person', 'Assign to…')}
       ${btn('bulk-remove', 'bi-trash', 'Remove', false, 'btn-outline-danger')}
     </div>
@@ -272,6 +323,13 @@ async function bulkApply(ids, request) {
 
 const bulkPatch = (body) => bulkApply([...selected], (path) => api.patch(path, body));
 
+/** Set packed/status on the selected items' claims: mine in the Mine view, everyone's otherwise. */
+function bulkClaims(body) {
+  if (!mineOnly()) return bulkPatch(body);
+  const ids = selectedItems().filter(mine).map((i) => i.id);
+  return bulkApply(ids, (path) => api.put(`${path}/contributions/${me()}`, body));
+}
+
 async function bulkRemove() {
   const ids = [...selected];
   if (!(await confirmDialog(`Remove ${ids.length} item${ids.length === 1 ? '' : 's'} from this trip?`))) return;
@@ -279,19 +337,20 @@ async function bulkRemove() {
   clearSelection();
 }
 
+/** Add a person to every selected item. They bring what's still missing (or their own one). */
 function assignMenu(anchor) {
   const trip = store.trip;
-  const me = store.currentUserId;
-  const assign = (owner_id) => () => bulkPatch({ owner_id });
+  const self = me();
+  const assign = (userId) => () => bulkApply([...selected], (path) => api.put(`${path}/contributions/${userId}`, {}));
   const others = store.users.filter((u) => !trip.member_ids.includes(u.id));
   showContextMenu(anchor, [
-    ...(me ? [{ label: `Me (${store.name('users', me)})`, icon: 'bi-person-check', action: assign(me) }, 'divider'] : []),
+    ...(self ? [{ label: `Me (${store.name('users', self)})`, icon: 'bi-person-check', action: assign(self) }, 'divider'] : []),
     ...(trip.member_ids.length ? [{ header: 'Members' }] : []),
-    ...trip.member_ids.filter((id) => id !== me).map((id) => ({ label: store.name('users', id), icon: 'bi-person', action: assign(id) })),
+    ...trip.member_ids.filter((id) => id !== self).map((id) => ({ label: store.name('users', id), icon: 'bi-person', action: assign(id) })),
     ...(others.length ? [{ header: 'Others (joins the trip)' }] : []),
-    ...others.filter((u) => u.id !== me).map((u) => ({ label: u.display_name, icon: 'bi-person-plus', action: assign(u.id) })),
+    ...others.filter((u) => u.id !== self).map((u) => ({ label: u.display_name, icon: 'bi-person-plus', action: assign(u.id) })),
     'divider',
-    { label: 'Unassigned', icon: 'bi-person-dash', action: assign(null) },
+    { label: 'Clear everyone’s claims', icon: 'bi-person-dash', action: () => bulkPatch({ contributions: [] }) },
   ]);
 }
 
@@ -394,9 +453,9 @@ async function removeCategory(categoryId) {
 }
 
 async function removeMember(userId) {
-  const owned = store.trip.items.filter((i) => i.owner_id === userId).length;
+  const owned = store.trip.items.filter((i) => contributionOf(i, userId)).length;
   const name = store.name('users', userId);
-  if (owned && !(await confirmDialog(`Remove ${name} from this trip? Their ${owned} item${owned === 1 ? '' : 's'} become unassigned.`))) return;
+  if (owned && !(await confirmDialog(`Remove ${name} from this trip? Their claims on ${owned} item${owned === 1 ? '' : 's'} are dropped.`))) return;
   await tripCall('del', `/members/${userId}`);
 }
 
@@ -418,10 +477,14 @@ async function setDefaultsFromCard(categoryId) {
   toast(`Updated ${n} suppl${n === 1 ? 'y' : 'ies'} to default to “${name}”.`, 'success');
 }
 
+/** Claims on a card, and whether every one of them is packed. */
+function cardClaims(categoryId) {
+  const claims = store.trip.items.filter((i) => i.category_id === categoryId).flatMap((i) => i.contributions);
+  return { claims, allPacked: claims.length > 0 && claims.every((c) => c.packed) };
+}
+
 function setCategoryPacked(categoryId) {
-  const items = store.trip.items.filter((i) => i.category_id === categoryId);
-  const allPacked = items.length > 0 && items.every((i) => i.packed);
-  return tripCall('put', `/categories/${categoryId}/packed`, { packed: !allPacked });
+  return tripCall('put', `/categories/${categoryId}/packed`, { packed: !cardClaims(categoryId).allPacked });
 }
 
 async function quickAdd(form) {
@@ -474,26 +537,77 @@ function tripMenu(anchor) {
   ]);
 }
 
-function itemMenu(e, item) {
-  const me = store.currentUserId;
-  const mine = me && item.owner_id === me;
+const claimPath = (item, userId) => `/items/${item.id}/contributions/${userId}`;
+const openEditor = (item) => editItem(store.trip, item).then((t) => t && store.setTrip(t));
+
+/**
+ * Claim an item for me. Per-person items and single missing ones are claimed in one
+ * tap; otherwise a menu asks how many, defaulting to all that's still missing.
+ */
+function claim(anchor, item) {
+  if (!me()) return toast('Pick yourself under “I am” first.', 'warning');
+  const left = target(store.trip, item) - covered(item);
+  const bring = (count) => () => tripCall('put', claimPath(item, me()), { count });
+  if (item.per_person || left <= 1) return bring(item.per_person ? 1 : Math.max(1, left))();
+  const counts = [...new Set([left, 4, 3, 2, 1])].filter((n) => n <= left);
+  showContextMenu(anchor, [
+    { header: `I'll bring… (${left} still needed)` },
+    ...counts.map((n) => ({ label: n === left ? `${n} (all of it)` : String(n), icon: 'bi-plus-lg', action: bring(n) })),
+    { label: 'Another amount…', icon: 'bi-123', action: () => askCount(item, me(), left) },
+  ]);
+}
+
+async function askCount(item, userId, value) {
+  await formModal({
+    title: `How many ${userId === me() ? 'are you' : `is ${store.name('users', userId)}`} bringing?`,
+    submitLabel: 'Save',
+    fields: [{ name: 'count', label: store.name('supplies', item.supply_id), type: 'number', min: 1, value, required: true }],
+    onSubmit: (v) => tripCall('put', claimPath(item, userId), { count: v.count }),
+  });
+}
+
+function toggleChip(item, userId) {
+  const c = contributionOf(item, userId);
+  if (c) return tripCall('put', claimPath(item, userId), { packed: !c.packed });
+}
+
+function chipMenu(e, item, userId) {
+  const c = contributionOf(item, userId);
+  if (!c) return;
+  const who = userId === me() ? 'You' : store.name('users', userId);
   showContextMenu(e, [
-    { label: 'Edit…', icon: 'bi-pencil', action: () => editItem(store.trip, item).then((t) => t && store.setTrip(t)) },
+    { header: `${who}${c.count > 1 ? ` ×${c.count}` : ''}` },
+    { label: c.packed ? 'Unpack' : 'Pack', icon: c.packed ? 'bi-square' : 'bi-check2-square', action: () => toggleChip(item, userId) },
     {
-      label: mine ? 'Unclaim' : me ? 'Claim (me)' : 'Claim (pick yourself first)',
-      icon: mine ? 'bi-person-dash' : 'bi-person-check',
-      disabled: !me,
-      action: () => tripCall('patch', `/items/${item.id}`, { owner_id: mine ? null : me }),
+      label: c.status === 'needed' ? 'Mark owned' : 'Mark needed (still to get)',
+      icon: c.status === 'needed' ? 'bi-bag-check' : 'bi-bag',
+      action: () => tripCall('put', claimPath(item, userId), { status: c.status === 'needed' ? 'owned' : 'needed' }),
+    },
+    { label: 'Change count…', icon: 'bi-123', action: () => askCount(item, userId, c.count) },
+    'divider',
+    { label: 'Remove claim', icon: 'bi-person-dash', danger: true, action: () => tripCall('del', claimPath(item, userId)) },
+  ]);
+}
+
+function itemMenu(e, item) {
+  const mineNow = mine(item);
+  const claims = item.contributions;
+  const allPacked = claims.length > 0 && claims.every((c) => c.packed);
+  showContextMenu(e, [
+    { label: 'Edit…', icon: 'bi-pencil', action: () => openEditor(item) },
+    mineNow
+      ? { label: 'Unclaim mine', icon: 'bi-person-dash', action: () => tripCall('del', claimPath(item, me())) }
+      : { label: me() ? 'I’ll bring this…' : 'I’ll bring this (pick yourself first)', icon: 'bi-person-check', disabled: !me(), action: () => claim(e, item) },
+    {
+      label: allPacked ? 'Unpack everyone’s' : 'Pack everyone’s',
+      icon: allPacked ? 'bi-square' : 'bi-check2-square',
+      disabled: !claims.length,
+      action: () => tripCall('patch', `/items/${item.id}`, { packed: !allPacked }),
     },
     {
-      label: item.status === 'needed' ? 'Mark owned' : 'Mark needed',
-      icon: item.status === 'needed' ? 'bi-bag-check' : 'bi-bag',
-      action: () => tripCall('patch', `/items/${item.id}`, { status: item.status === 'needed' ? 'owned' : 'needed' }),
-    },
-    {
-      label: item.packed ? 'Unpack' : 'Pack',
-      icon: item.packed ? 'bi-square' : 'bi-check2-square',
-      action: () => tripCall('patch', `/items/${item.id}`, { packed: !item.packed }),
+      label: item.per_person ? 'Use a fixed count' : 'One per person',
+      icon: item.per_person ? 'bi-123' : 'bi-people',
+      action: () => tripCall('patch', `/items/${item.id}`, { per_person: !item.per_person }),
     },
     { label: 'Edit library supply…', icon: 'bi-backpack', action: () => editEntity('supply', item.supply_id) },
     'divider',
@@ -502,10 +616,9 @@ function itemMenu(e, item) {
 }
 
 function cardMenu(e, categoryId) {
-  const items = store.trip.items.filter((i) => i.category_id === categoryId);
-  const allPacked = items.length > 0 && items.every((i) => i.packed);
+  const { claims, allPacked } = cardClaims(categoryId);
   showContextMenu(e, [
-    { label: allPacked ? 'Unpack all' : 'Pack all', icon: 'bi-check2-square', disabled: !items.length, action: () => setCategoryPacked(categoryId) },
+    { label: allPacked ? 'Unpack all' : 'Pack all', icon: 'bi-check2-square', disabled: !claims.length, action: () => setCategoryPacked(categoryId) },
     { label: 'Rename / edit category…', icon: 'bi-pencil', action: () => editEntity('category', categoryId) },
     { label: 'Update library defaults', icon: 'bi-bookmark-check', disabled: !staleDefaults(categoryId).length, action: () => setDefaultsFromCard(categoryId) },
     'divider',
@@ -555,21 +668,27 @@ export function initBoard() {
         return toggleItem(itemEl.dataset.dragId, { range: e.shiftKey });
       case 'select-cat':
         return toggleCategory(cardEl);
-      case 'toggle-status': {
+      case 'chip':
+      case 'slot':
+      case 'claim':
+      case 'edit-item': {
         const item = findItem(itemEl.dataset.dragId);
         if (!item) return;
-        return tripCall('patch', `/items/${item.id}`, { status: item.status === 'needed' ? 'owned' : 'needed' });
+        if (act === 'chip') return toggleChip(item, el.dataset.user);
+        if (act === 'slot') return tripCall('put', claimPath(item, el.dataset.user), {});
+        if (act === 'claim') return claim(el, item);
+        return openEditor(item);
       }
       case 'remove-item':
         return tripCall('del', `/items/${itemEl.dataset.dragId}`);
       case 'bulk-pack':
-        return bulkPatch({ packed: true });
+        return bulkClaims({ packed: true });
       case 'bulk-unpack':
-        return bulkPatch({ packed: false });
+        return bulkClaims({ packed: false });
       case 'bulk-owned':
-        return bulkPatch({ status: 'owned' });
+        return bulkClaims({ status: 'owned' });
       case 'bulk-needed':
-        return bulkPatch({ status: 'needed' });
+        return bulkClaims({ status: 'needed' });
       case 'bulk-assign':
         return assignMenu(el);
       case 'bulk-remove':
@@ -604,7 +723,7 @@ export function initBoard() {
     const itemEl = e.target.closest('.item');
     if (itemEl && !e.target.closest('[data-act]')) {
       const item = findItem(itemEl.dataset.dragId);
-      if (item) editItem(store.trip, item).then((t) => t && store.setTrip(t));
+      if (item) openEditor(item);
     }
   });
   root.addEventListener('contextmenu', (e) => {
@@ -613,7 +732,9 @@ export function initBoard() {
     const itemEl = e.target.closest('.item');
     if (itemEl) {
       const item = findItem(itemEl.dataset.dragId);
-      if (item) itemMenu(e, item);
+      const chip = e.target.closest('[data-act="chip"]');
+      if (item && chip) chipMenu(e, item, chip.dataset.user);
+      else if (item) itemMenu(e, item);
       return;
     }
     const cardEl = e.target.closest('.cat-card');

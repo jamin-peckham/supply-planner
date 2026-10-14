@@ -14,6 +14,8 @@ from .models import (
     UNCATEGORIZED_ID,
     Category,
     CloneIn,
+    Contribution,
+    ContributionPatch,
     ItemIn,
     ItemMoveIn,
     ItemPatch,
@@ -76,7 +78,7 @@ def delete_user(db: Database, user_id: str) -> None:
     with db.lock:
         _require(db.users, user_id, "User")
         for trip in db.trips.all():
-            if user_id in trip.member_ids or any(i.owner_id == user_id for i in trip.items):
+            if user_id in trip.member_ids or any(i.contribution(user_id) for i in trip.items):
                 _mutate_trip(db, trip.id, lambda t: _drop_user_from_trip(t, user_id))
         db.users.delete(user_id)
 
@@ -84,8 +86,7 @@ def delete_user(db: Database, user_id: str) -> None:
 def _drop_user_from_trip(trip: Trip, user_id: str) -> None:
     trip.member_ids = [m for m in trip.member_ids if m != user_id]
     for item in trip.items:
-        if item.owner_id == user_id:
-            item.owner_id = None
+        item.contributions = [c for c in item.contributions if c.owner_id != user_id]
 
 
 # --- Categories --------------------------------------------------------------
@@ -376,9 +377,13 @@ def clone_trip(db: Database, trip_id: str, body: CloneIn) -> Trip:
                 supply_id=i.supply_id,
                 category_id=i.category_id,
                 count=i.count,
-                status=Status.NEEDED if body.reset_status_to_needed else i.status,
-                packed=False,
-                owner_id=i.owner_id if keep_owners else None,
+                per_person=i.per_person,
+                contributions=[
+                    c.model_copy(update={"packed": False, "status": Status.NEEDED if body.reset_status_to_needed else c.status})
+                    for c in i.contributions
+                ]
+                if keep_owners
+                else [],
                 notes=i.notes,
             )
             for i in source.items
@@ -443,10 +448,81 @@ def move_trip_category(db: Database, trip_id: str, category_id: str, before_id: 
 
 
 def set_category_packed(db: Database, trip_id: str, category_id: str, packed: bool) -> Trip:
+    """Pack or unpack every contribution on a card. Unclaimed items stay as they are."""
+
     def apply(trip: Trip) -> None:
         for item in trip.items:
             if item.category_id == category_id:
-                item.packed = packed
+                for c in item.contributions:
+                    _set_contribution(c, packed=packed)
+
+    return _mutate_trip(db, trip_id, apply)
+
+
+# --- Contributions -------------------------------------------------------------
+
+
+def _set_contribution(c: Contribution, count: int | None = None, status: Status | None = None, packed: bool | None = None) -> None:
+    """Update a contribution. Packing implies the person has it; needing it means it isn't packed."""
+    if count is not None:
+        c.count = count
+    if status is not None:
+        c.status = status
+        if status == Status.NEEDED:
+            c.packed = False
+    if packed is not None:
+        c.packed = packed
+        if packed:
+            c.status = Status.OWNED
+
+
+def _default_share(trip: Trip, item: TripItem) -> int:
+    """What a new contributor brings by default: one each, or whatever is still missing."""
+    if item.per_person:
+        return 1
+    return max(1, item.target(len(trip.member_ids)) - item.covered())
+
+
+def _upsert_contribution(trip: Trip, item: TripItem, owner_id: str, patch: ContributionPatch) -> None:
+    c = item.contribution(owner_id)
+    if c is None:
+        c = Contribution(owner_id=owner_id, count=patch.count or _default_share(trip, item))
+        item.contributions.append(c)
+        _ensure_member(trip, owner_id)
+    _set_contribution(c, patch.count, patch.status, patch.packed)
+
+
+def _clean_contributions(db: Database, contributions: list[Contribution]) -> list[Contribution]:
+    """Validate owners and merge duplicates (one contribution per person)."""
+    merged: dict[str, Contribution] = {}
+    for c in contributions:
+        _require(db.users, c.owner_id, "User")
+        if c.owner_id in merged:
+            merged[c.owner_id].count += c.count
+        else:
+            merged[c.owner_id] = c.model_copy()
+    for c in merged.values():
+        _set_contribution(c, status=c.status, packed=c.packed)  # keep packed/status consistent
+    return list(merged.values())
+
+
+def set_contribution(db: Database, trip_id: str, item_id: str, user_id: str, patch: ContributionPatch) -> Trip:
+    """Claim (part of) an item for a person, or change their claim. They join the trip."""
+    with db.lock:
+        _require(db.users, user_id, "User")
+
+        def apply(trip: Trip) -> None:
+            _upsert_contribution(trip, _find_item(trip, item_id), user_id, patch)
+
+        return _mutate_trip(db, trip_id, apply)
+
+
+def remove_contribution(db: Database, trip_id: str, item_id: str, user_id: str) -> Trip:
+    def apply(trip: Trip) -> None:
+        item = _find_item(trip, item_id)
+        if not item.contribution(user_id):
+            raise NotFound(f"{user_id} is not bringing this item")
+        item.contributions = [c for c in item.contributions if c.owner_id != user_id]
 
     return _mutate_trip(db, trip_id, apply)
 
@@ -456,7 +532,8 @@ def add_item(db: Database, trip_id: str, body: ItemIn) -> Trip:
 
     Without an explicit category the supply's default category is used (or that of
     `before_id`, the item it lands in front of), and that category is added to the
-    trip if it isn't there yet.
+    trip if it isn't there yet. A supply appears once per card: adding it to a card
+    that already has it only adds the owner's claim, if one is given.
     """
     with db.lock:
         trip = _require(db.trips, trip_id, "Trip")
@@ -477,19 +554,25 @@ def add_item(db: Database, trip_id: str, body: ItemIn) -> Trip:
         category_id = body.category_id or (before and before.category_id) or supply.default_category_id
         if category_id not in db.categories:
             category_id = UNCATEGORIZED_ID
-        item = TripItem(
-            supply_id=supply.id,
-            category_id=category_id,
-            count=body.count or supply.default_count,
-            status=body.status,
-            owner_id=body.owner_id,
-        )
+        claim = ContributionPatch(count=body.count, status=body.status)
 
         def apply(trip: Trip) -> None:
             _ensure_category(trip, category_id)
-            if item.owner_id:
-                _ensure_member(trip, item.owner_id)
+            existing = next((i for i in trip.items if i.supply_id == supply.id and i.category_id == category_id), None)
+            if existing:
+                if body.owner_id:
+                    _upsert_contribution(trip, existing, body.owner_id, claim)
+                    existing.count = max(existing.count, existing.covered())  # "another one", not a duplicate row
+                return
+            item = TripItem(
+                supply_id=supply.id,
+                category_id=category_id,
+                count=body.count or supply.default_count,
+                per_person=supply.per_person if body.per_person is None else body.per_person,
+            )
             trip.items.append(item)
+            if body.owner_id:
+                _upsert_contribution(trip, item, body.owner_id, claim.model_copy(update={"count": None}))
             if body.before_id:
                 _place_items(trip, [item.id], category_id, body.before_id)
 
@@ -498,24 +581,21 @@ def add_item(db: Database, trip_id: str, body: ItemIn) -> Trip:
 
 def update_item(db: Database, trip_id: str, item_id: str, patch: ItemPatch) -> Trip:
     with db.lock:
-        changes = patch.model_dump(exclude_unset=True)
-        if changes.get("category_id"):
+        changes = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
+        if "category_id" in changes:
             _require(db.categories, changes["category_id"], "Category")
-        elif "category_id" in changes:
-            del changes["category_id"]
-        if changes.get("owner_id"):
-            _require(db.users, changes["owner_id"], "User")
-        for key in ("count", "status", "packed", "notes"):
-            if key in changes and changes[key] is None:
-                del changes[key]
+        status, packed = changes.pop("status", None), changes.pop("packed", None)
+        if patch.contributions is not None:
+            changes["contributions"] = _clean_contributions(db, patch.contributions)
 
         def apply(trip: Trip) -> None:
             item = _find_item(trip, item_id)
             old_category = item.category_id
             for key, value in changes.items():
                 setattr(item, key, value)
-            if item.owner_id:
-                _ensure_member(trip, item.owner_id)
+            for c in item.contributions:
+                _ensure_member(trip, c.owner_id)
+                _set_contribution(c, status=status, packed=packed)
             if item.category_id != old_category:
                 _place_items(trip, [item.id], item.category_id, None)  # lands at the end of its new card
             _ensure_category(trip, item.category_id)
@@ -553,7 +633,8 @@ def apply_standard_set(db: Database, trip_id: str, set_id: str) -> Trip:
                     continue
                 cid = s.category_id if s.category_id in db.categories else UNCATEGORIZED_ID
                 _ensure_category(trip, cid)
-                trip.items.append(TripItem(supply_id=s.supply_id, category_id=cid, count=s.count))
+                per_person = db.supplies.get(s.supply_id).per_person
+                trip.items.append(TripItem(supply_id=s.supply_id, category_id=cid, count=s.count, per_person=per_person))
                 existing.add((s.supply_id, cid))
 
         return _mutate_trip(db, trip_id, apply)

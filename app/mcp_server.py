@@ -28,6 +28,7 @@ from . import services as svc
 from .models import (
     UNCATEGORIZED_ID,
     CloneIn,
+    ContributionPatch,
     ItemIn,
     ItemMoveIn,
     ItemPatch,
@@ -35,14 +36,17 @@ from .models import (
     SupplyIn,
     Trip,
     TripIn,
+    TripItem,
     TripPatch,
 )
 from .storage import Database, Repository, get_db
 
 INSTRUCTIONS = """\
 Trip Supply Planner: a shared library of users, categories, supplies and standard sets,
-composed into trips. Each trip item is a library supply with count, status (needed/owned),
-packed flag and optional owner. Refer to anything by display name or id. Typical flow:
+composed into trips. Each trip item is a library supply with a target count (or one per
+member when per_person) and contributions: who brings how many, each with its own status
+(needed = still to buy, owned) and packed flag. Several people can share one item, e.g.
+Alice brings 4 of 6 water jugs and Bob 2. Refer to anything by display name or id. Typical flow:
 list_trips / get_trip to orient, search_library to reuse existing supplies and standard sets,
 then add_items / update_items in bulk. trip_gaps shows what still needs attention.
 People watching the trip in a browser see your changes within a few seconds."""
@@ -117,7 +121,7 @@ def _item(db: Database, trip: Trip, ref: str) -> str:
         raise ToolError(f"No item named '{ref}' on trip '{trip.display_name}'.")
     raise ToolError(
         f"'{ref}' appears {len(matches)} times on this trip; use an item id: "
-        + ", ".join(f"{m.id} (owner: {_name(db.users, m.owner_id) if m.owner_id else 'none'})" for m in matches)
+        + ", ".join(f"{m.id} (category: {_name(db.categories, m.category_id)})" for m in matches)
     )
 
 
@@ -129,14 +133,28 @@ def _name(repo: Repository[Any], obj_id: str | None) -> str:
 # --- Presentation --------------------------------------------------------------
 
 
-def _item_view(db: Database, item: Any) -> dict[str, Any]:
+def _missing_people(db: Database, trip: Trip, item: TripItem) -> list[str]:
+    """Members without their own one of a per-person item."""
+    if not item.per_person:
+        return []
+    return [_name(db.users, m) for m in trip.member_ids if not item.contribution(m)]
+
+
+def _item_view(db: Database, trip: Trip, item: TripItem) -> dict[str, Any]:
+    members = len(trip.member_ids)
+    target = item.target(members)
     return {
         "id": item.id,
         "name": _name(db.supplies, item.supply_id),
-        "count": item.count,
-        "status": item.status.value,
-        "packed": item.packed,
-        "owner": _name(db.users, item.owner_id) if item.owner_id else None,
+        "target": target,
+        **({"per_person": True} if item.per_person else {}),
+        "covered": item.covered(),
+        "short": max(0, target - item.covered()),
+        "packed": item.fully_packed(members),
+        "bringing": [
+            {"who": _name(db.users, c.owner_id), "count": c.count, "status": c.status.value, "packed": c.packed}
+            for c in item.contributions
+        ],
         **({"notes": item.notes} if item.notes else {}),
     }
 
@@ -144,9 +162,10 @@ def _item_view(db: Database, item: Any) -> dict[str, Any]:
 def _trip_view(db: Database, trip: Trip) -> dict[str, Any]:
     categories = []
     for cid in trip.category_ids:
-        items = [_item_view(db, i) for i in trip.items if i.category_id == cid]
+        items = [_item_view(db, trip, i) for i in trip.items if i.category_id == cid]
         categories.append({"category": _name(db.categories, cid), "items": items})
     total = len(trip.items)
+    members = len(trip.member_ids)
     return {
         "id": trip.id,
         "name": trip.display_name,
@@ -156,9 +175,9 @@ def _trip_view(db: Database, trip: Trip) -> dict[str, Any]:
         "members": [_name(db.users, m) for m in trip.member_ids],
         "totals": {
             "items": total,
-            "packed": sum(i.packed for i in trip.items),
-            "needed": sum(i.status == Status.NEEDED for i in trip.items),
-            "unassigned": sum(i.owner_id is None for i in trip.items),
+            "packed": sum(i.fully_packed(members) for i in trip.items),
+            "short": sum(i.covered() < i.target(members) for i in trip.items),
+            "to_buy": sum(c.status == Status.NEEDED for i in trip.items for c in i.contributions),
         },
         "categories": categories,
     }
@@ -172,14 +191,17 @@ def trip_markdown(db: Database, trip: Trip) -> str:
         lines.append(f"Dates: {dates}")
     lines.append(f"Members: {', '.join(view['members']) or 'none'}")
     t = view["totals"]
-    lines += [f"Packed {t['packed']}/{t['items']} · {t['needed']} needed · {t['unassigned']} unassigned", ""]
+    lines += [f"Packed {t['packed']}/{t['items']} · {t['short']} short · {t['to_buy']} to buy", ""]
     for cat in view["categories"]:
         lines.append(f"## {cat['category']}")
         for i in cat["items"]:
             box = "x" if i["packed"] else " "
-            count = f" ×{i['count']}" if i["count"] > 1 else ""
-            owner = f" — {i['owner']}" if i["owner"] else ""
-            lines.append(f"- [{box}] {i['name']}{count} ({i['status']}){owner}")
+            each = " (one per person)" if i.get("per_person") else ""
+            who = ", ".join(
+                f"{b['who']}{f' ×{b['count']}' if b['count'] > 1 else ''} ({'packed' if b['packed'] else b['status']})"
+                for b in i["bringing"]
+            )
+            lines.append(f"- [{box}] {i['name']}{each} {i['covered']}/{i['target']} — {who or 'unclaimed'}")
         if not cat["items"]:
             lines.append("- (empty)")
         lines.append("")
@@ -236,6 +258,7 @@ def search_library(
                 "name": s.display_name,
                 "default_category": _name(db.categories, s.default_category_id),
                 "default_count": s.default_count,
+                **({"per_person": True} if s.per_person else {}),
                 **({"notes": s.notes} if s.notes else {}),
             }
             for s in db.supplies.all()
@@ -259,24 +282,39 @@ def search_library(
 @mcp.tool(annotations=READ)
 @_tool_errors
 def trip_gaps(trip: str) -> dict[str, Any]:
-    """What still needs attention on a trip: needed, unassigned and unpacked items, plus per-person lists."""
+    """What still needs attention on a trip.
+
+    short: items nobody (or not enough people) has claimed; per-person items list who is missing.
+    to_buy: claims whose owner still has to get the item. unpacked: claims not packed yet.
+    bringing_by_person: each member's packing list.
+    """
     db = get_db()
     t = _trip(db, trip)
-
-    def brief(i: Any) -> dict[str, Any]:
-        v = _item_view(db, i)
-        v["category"] = _name(db.categories, i.category_id)
-        return v
-
+    members = len(t.member_ids)
+    short = []
+    to_buy: list[str] = []
+    unpacked: list[str] = []
     by_person: dict[str, list[str]] = {_name(db.users, m): [] for m in t.member_ids}
     for i in t.items:
-        if i.owner_id:
-            by_person.setdefault(_name(db.users, i.owner_id), []).append(_name(db.supplies, i.supply_id))
+        name = _name(db.supplies, i.supply_id)
+        if (missing := i.target(members) - i.covered()) > 0:
+            entry = {"name": name, "category": _name(db.categories, i.category_id), "missing": missing}
+            if i.per_person:
+                entry["missing_people"] = _missing_people(db, t, i)
+            short.append(entry)
+        for c in i.contributions:
+            who = _name(db.users, c.owner_id)
+            label = f"{name} ×{c.count}" if c.count > 1 else name
+            if c.status == Status.NEEDED:
+                to_buy.append(f"{label} ({who})")
+            if not c.packed:
+                unpacked.append(f"{label} ({who})")
+            by_person.setdefault(who, []).append(f"{label} ({'packed' if c.packed else c.status.value})")
     return {
         "trip": t.display_name,
-        "needed": [brief(i) for i in t.items if i.status == Status.NEEDED],
-        "unassigned": [brief(i) for i in t.items if i.owner_id is None],
-        "unpacked": [brief(i) for i in t.items if not i.packed],
+        "short": short,
+        "to_buy": to_buy,
+        "unpacked": unpacked,
         "empty_categories": [_name(db.categories, c) for c in t.category_ids if not any(i.category_id == c for i in t.items)],
         "bringing_by_person": by_person,
     }
@@ -288,19 +326,28 @@ def trip_gaps(trip: str) -> dict[str, Any]:
 class ItemSpec(BaseModel):
     name: str = Field(description="Supply name; reuses the library supply or creates a new one")
     category: str | None = Field(None, description="Category name or id; created if new. Defaults to the supply's default category")
-    count: int | None = Field(None, ge=1, description="Defaults to the supply's default count")
-    status: Literal["needed", "owned"] = "needed"
-    owner: str | None = Field(None, description="User name or id; owners join the trip automatically")
+    count: int | None = Field(None, ge=1, description="How many are needed. Defaults to the supply's default count")
+    per_person: bool | None = Field(None, description="One per trip member instead of a fixed count. Defaults to the supply's setting")
+    owner: str | None = Field(None, description="User name or id who brings it (all of it, or their one for per-person); joins the trip")
+    status: Literal["needed", "owned"] = Field("needed", description="Whether the owner still has to get it")
+
+
+class Share(BaseModel):
+    who: str = Field(description="User name or id; joins the trip automatically")
+    count: int | None = Field(None, ge=0, description="How many they bring; 0 drops their claim. New claims default to what is still missing")
+    status: Literal["needed", "owned"] | None = None
+    packed: bool | None = None
 
 
 class ItemChange(BaseModel):
     item: str = Field(description="Item id, or the supply name if it appears once on the trip")
-    count: int | None = Field(None, ge=1)
-    status: Literal["needed", "owned"] | None = None
-    packed: bool | None = None
-    owner: str | None = Field(None, description="User name or id; 'none' unassigns")
+    count: int | None = Field(None, ge=1, description="How many are needed in total")
+    per_person: bool | None = None
     category: str | None = Field(None, description="Move to this category (name or id; created if new)")
     notes: str | None = None
+    packed: bool | None = Field(None, description="Pack or unpack every claim on the item")
+    status: Literal["needed", "owned"] | None = Field(None, description="Set every claim on the item")
+    bringing: list[Share] | None = Field(None, description="Add or change claims; people not listed keep theirs")
 
 
 @mcp.tool(annotations=WRITE)
@@ -355,7 +402,7 @@ def update_trip(
 ) -> dict[str, Any]:
     """Rename a trip, change its description or dates, or add/remove members.
 
-    Removing a member unassigns the items they owned on this trip.
+    Removing a member drops their claims on this trip.
     """
     db = get_db()
     with db.lock:
@@ -388,7 +435,8 @@ def add_categories(trip: str, categories: list[str]) -> dict[str, Any]:
 def add_items(trip: str, items: list[ItemSpec]) -> dict[str, Any]:
     """Add supplies to a trip in bulk. Unknown supplies and categories are added to the library.
 
-    The same supply may be added more than once, e.g. one per person bringing it.
+    A supply appears once per category. Adding it again with an owner adds that person's
+    claim to the existing item (raising its count if needed) instead of a second row.
     """
     db = get_db()
     with db.lock:
@@ -402,6 +450,7 @@ def add_items(trip: str, items: list[ItemSpec]) -> dict[str, Any]:
                 new_name=None if by_id else spec.name,
                 category_id=category_id,
                 count=spec.count,
+                per_person=spec.per_person,
                 status=Status(spec.status),
                 owner_id=_user_id(db, spec.owner),
             )
@@ -412,23 +461,36 @@ def add_items(trip: str, items: list[ItemSpec]) -> dict[str, Any]:
 @mcp.tool(annotations=WRITE)
 @_tool_errors
 def update_items(trip: str, changes: list[ItemChange]) -> dict[str, Any]:
-    """Change items in bulk: count, needed/owned status, packed, owner, category or notes."""
+    """Change items in bulk: target count, per-person, category, notes, and who brings how many.
+
+    Split an item between people with `bringing`, e.g. [{"who": "Alice", "count": 4}, {"who": "Bob", "count": 2}].
+    """
     db = get_db()
     with db.lock:
         t = _trip(db, trip)
         for ch in changes:
             item_id = _item(db, t, ch.item)
             patch: dict[str, Any] = {}
-            for key in ("count", "packed", "notes"):
+            for key in ("count", "per_person", "packed", "notes"):
                 if getattr(ch, key) is not None:
                     patch[key] = getattr(ch, key)
             if ch.status is not None:
                 patch["status"] = Status(ch.status)
-            if ch.owner is not None:
-                patch["owner_id"] = _user_id(db, ch.owner)
             if ch.category is not None:
                 patch["category_id"] = _category_id(db, ch.category)
-            t = svc.update_item(db, t.id, item_id, ItemPatch(**patch))
+            if patch:
+                t = svc.update_item(db, t.id, item_id, ItemPatch(**patch))
+            for share in ch.bringing or []:
+                user_id = _resolve(db.users, share.who, "user").id
+                if share.count == 0:
+                    t = svc.remove_contribution(db, t.id, item_id, user_id)
+                    continue
+                claim = ContributionPatch(
+                    count=share.count,
+                    status=Status(share.status) if share.status else None,
+                    packed=share.packed,
+                )
+                t = svc.set_contribution(db, t.id, item_id, user_id, claim)
         return _trip_view(db, t)
 
 
@@ -543,14 +605,19 @@ def create_user(name: str, email: str = "") -> dict[str, Any]:
 
 @mcp.tool(annotations=WRITE)
 @_tool_errors
-def create_supply(name: str, default_category: str | None = None, default_count: int = 1, notes: str = "") -> dict[str, Any]:
-    """Add a reusable supply to the library (category created if new). Returns the existing one if the name is taken."""
+def create_supply(
+    name: str, default_category: str | None = None, default_count: int = 1, per_person: bool = False, notes: str = ""
+) -> dict[str, Any]:
+    """Add a reusable supply to the library (category created if new). Returns the existing one if the name is taken.
+
+    per_person: trips need one per member (sleeping bag, headlamp) instead of default_count.
+    """
     db = get_db()
     with db.lock:
         if existing := next((s for s in db.supplies.all() if s.display_name.casefold() == name.strip().casefold()), None):
             return {"id": existing.id, "name": existing.display_name, "already_existed": True}
         cid = _category_id(db, default_category) if default_category else UNCATEGORIZED_ID
-        s = svc.create_supply(db, SupplyIn(display_name=name, default_category_id=cid, default_count=default_count, notes=notes))
+        s = svc.create_supply(db, SupplyIn(display_name=name, default_category_id=cid, default_count=default_count, per_person=per_person, notes=notes))
         return {"id": s.id, "name": s.display_name, "default_category": _name(db.categories, cid)}
 
 
@@ -593,7 +660,8 @@ def plan_trip(trip: str, notes: str = "") -> str:
 2. Call search_library for standard_sets and supplies; prefer reusing existing entries and sets.
 3. Propose additions grouped by category with counts, and ask before making large changes.
 4. Apply agreed changes with add_items / update_items in bulk (one call per batch, not per item).
-5. Finish with trip_gaps and summarise what is still needed or unassigned."""
+5. Use per_person for things everyone brings their own of, and split shared items between people with update_items.
+6. Finish with trip_gaps and summarise what is still short, to buy or unassigned."""
 
 
 # --- HTTP mounting -------------------------------------------------------------

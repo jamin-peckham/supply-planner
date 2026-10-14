@@ -6,6 +6,7 @@ from .. import services as svc
 from ..models import (
     CategoryMoveIn,
     CloneIn,
+    ContributionPatch,
     ItemIn,
     ItemMoveIn,
     ItemPatch,
@@ -108,6 +109,17 @@ def update_item(trip_id: str, item_id: str, body: ItemPatch) -> Trip:
 @router.delete("/{trip_id}/items/{item_id}")
 def delete_item(trip_id: str, item_id: str) -> Trip:
     return svc.delete_item(get_db(), trip_id, item_id)
+
+
+@router.put("/{trip_id}/items/{item_id}/contributions/{user_id}")
+def set_contribution(trip_id: str, item_id: str, user_id: str, body: ContributionPatch) -> Trip:
+    """Claim (part of) an item for a person, or change their claim."""
+    return svc.set_contribution(get_db(), trip_id, item_id, user_id, body)
+
+
+@router.delete("/{trip_id}/items/{item_id}/contributions/{user_id}")
+def remove_contribution(trip_id: str, item_id: str, user_id: str) -> Trip:
+    return svc.remove_contribution(get_db(), trip_id, item_id, user_id)
 
 
 @router.post("/{trip_id}/apply-set/{set_id}")

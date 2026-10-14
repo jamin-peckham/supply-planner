@@ -112,7 +112,6 @@ export async function confirmDialog(message, { title = 'Are you sure?', confirmL
 }
 
 const categoryOptions = () => store.categories.map((c) => ({ value: c.id, label: c.display_name }));
-const userOptions = () => [{ value: '', label: '— none —' }, ...store.users.map((u) => ({ value: u.id, label: u.display_name }))];
 
 // --- Library editors ---------------------------------------------------------
 
@@ -155,6 +154,13 @@ export function editSupply(supply = null, preset = {}) {
         help: 'Used when the supply is added to a trip without picking a category.',
       },
       { name: 'default_count', label: 'Default count', type: 'number', min: 1, value: supply?.default_count ?? 1, required: true },
+      {
+        name: 'per_person',
+        label: 'One per person',
+        type: 'checkbox',
+        value: supply?.per_person ?? false,
+        help: 'Trips need one for every member, like a sleeping bag or headlamp.',
+      },
       { name: 'notes', label: 'Notes', type: 'textarea', value: supply?.notes ?? '' },
     ],
     onSubmit: (v) => (supply ? api.patch(`/supplies/${supply.id}`, v) : api.post('/supplies', v)),
@@ -263,8 +269,8 @@ export function cloneTrip(trip) {
     fields: [
       { name: 'display_name', label: 'New trip name', value: `${trip.display_name} (copy)`, required: true },
       { name: 'keep_members', label: 'Keep members', type: 'checkbox', value: true },
-      { name: 'keep_owners', label: 'Keep item owners (requires keeping members)', type: 'checkbox', value: false },
-      { name: 'reset_status_to_needed', label: 'Reset every item to “needed”', type: 'checkbox', value: false },
+      { name: 'keep_owners', label: 'Keep who brings what (requires keeping members)', type: 'checkbox', value: false },
+      { name: 'reset_status_to_needed', label: 'Reset kept claims to “still to get”', type: 'checkbox', value: false },
     ],
     onSubmit: (v) => api.post(`/trips/${trip.id}/clone`, v),
   });
@@ -279,26 +285,75 @@ export function setFromTrip(trip) {
   });
 }
 
+/** One row per person bringing the item: who, how many, still to get / has it, packed. */
+function contributionsField(trip, initial) {
+  const userIds = new Set(store.users.map((u) => u.id));
+  // Members first, then everyone else (who joins the trip when picked).
+  const people = [...trip.member_ids.filter((id) => userIds.has(id)), ...store.users.map((u) => u.id).filter((id) => !trip.member_ids.includes(id))];
+  const options = people.map((id) => ({ value: id, label: store.name('users', id) }));
+  const row = (c = {}) => {
+    const id = `f${++seq}-packed`;
+    return `<div class="set-row contrib-row d-flex gap-2 mb-2 align-items-center">
+      <select class="form-select form-select-sm" data-k="owner_id" aria-label="Person">${optionList(options, c.owner_id ?? '')}</select>
+      <input class="form-control form-control-sm set-count" type="number" min="1" value="${c.count ?? 1}" data-k="count" aria-label="How many">
+      <select class="form-select form-select-sm contrib-status" data-k="status" aria-label="Status">${optionList(
+        [
+          { value: 'needed', label: 'To get' },
+          { value: 'owned', label: 'Has it' },
+        ],
+        c.status ?? 'needed',
+      )}</select>
+      <div class="form-check mb-0 text-nowrap"><input class="form-check-input" type="checkbox" data-k="packed" id="${id}"${c.packed ? ' checked' : ''}>
+        <label class="form-check-label small" for="${id}">Packed</label></div>
+      <button type="button" class="btn btn-sm btn-outline-danger" data-remove-row aria-label="Remove"><i class="bi bi-x-lg"></i></button>
+    </div>`;
+  };
+  return {
+    name: 'contributions',
+    label: 'Who’s bringing it',
+    type: 'custom',
+    render: () =>
+      options.length
+        ? `<div class="set-rows">${initial.map(row).join('')}</div>
+           <button type="button" class="btn btn-sm btn-outline-primary" data-add-row><i class="bi bi-person-plus"></i> Add person</button>`
+        : '<p class="text-body-secondary small mb-0">Add some users first.</p>',
+    mount(el) {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('[data-add-row]')) {
+          // Default the new row to someone who isn't bringing it yet.
+          const taken = new Set([...el.querySelectorAll('[data-k=owner_id]')].map((s) => s.value));
+          el.querySelector('.set-rows').insertAdjacentHTML('beforeend', row({ owner_id: people.find((id) => !taken.has(id)) }));
+        }
+        e.target.closest('[data-remove-row]')?.closest('.set-row').remove();
+      });
+    },
+    read: (el) =>
+      [...el.querySelectorAll('.contrib-row')].map((r) => ({
+        owner_id: r.querySelector('[data-k=owner_id]').value,
+        count: Math.max(1, Number(r.querySelector('[data-k=count]').value) || 1),
+        status: r.querySelector('[data-k=status]').value,
+        packed: r.querySelector('[data-k=packed]').checked,
+      })),
+  };
+}
+
 export function editItem(trip, item) {
+  const members = trip.member_ids.length;
   return formModal({
     title: store.name('supplies', item.supply_id),
+    size: 'modal-lg',
     fields: [
-      { name: 'count', label: 'Count', type: 'number', min: 1, value: item.count, required: true },
+      { name: 'count', label: 'How many are needed', type: 'number', min: 1, value: item.count, required: true },
       {
-        name: 'status',
-        label: 'Status',
-        type: 'select',
-        value: item.status,
-        options: [
-          { value: 'needed', label: 'Needed' },
-          { value: 'owned', label: 'Owned' },
-        ],
+        name: 'per_person',
+        label: `One per person instead (${members} member${members === 1 ? '' : 's'})`,
+        type: 'checkbox',
+        value: item.per_person,
       },
-      { name: 'owner_id', label: 'Owner', type: 'select', options: userOptions(), value: item.owner_id ?? '', help: 'Owners join the trip automatically.' },
+      contributionsField(trip, item.contributions),
       { name: 'category_id', label: 'Category', type: 'select', options: categoryOptions(), value: item.category_id },
-      { name: 'packed', label: 'Packed', type: 'checkbox', value: item.packed },
       { name: 'notes', label: 'Notes', type: 'textarea', value: item.notes ?? '' },
     ],
-    onSubmit: (v) => api.patch(`/trips/${trip.id}/items/${item.id}`, { ...v, owner_id: v.owner_id || null }),
+    onSubmit: (v) => api.patch(`/trips/${trip.id}/items/${item.id}`, v),
   });
 }

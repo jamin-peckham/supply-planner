@@ -55,6 +55,7 @@ class Category(Entity):
 class Supply(Entity):
     default_category_id: str = UNCATEGORIZED_ID
     default_count: int = Field(default=1, ge=1)
+    per_person: bool = False  # trips need one per member instead of default_count
     notes: str = ""
     archived: bool = False
 
@@ -74,15 +75,44 @@ class StandardSet(Entity):
 # --- Trip --------------------------------------------------------------------
 
 
+class Contribution(BaseModel):
+    """One person's share of a trip item. An item has at most one per owner."""
+
+    owner_id: str
+    count: int = Field(default=1, ge=1)
+    status: Status = Status.NEEDED
+    packed: bool = False
+
+
 class TripItem(BaseModel):
+    """A supply on a trip: how many are needed, and who brings how many.
+
+    The target is `count`, or one per trip member when `per_person` is set.
+    """
+
     id: str = Field(default_factory=new_id)
     supply_id: str
     category_id: str
     count: int = Field(default=1, ge=1)
-    status: Status = Status.NEEDED
-    packed: bool = False
-    owner_id: str | None = None
+    per_person: bool = False
+    contributions: list[Contribution] = Field(default_factory=list)
     notes: str = ""
+
+    def contribution(self, owner_id: str) -> Contribution | None:
+        return next((c for c in self.contributions if c.owner_id == owner_id), None)
+
+    def target(self, member_count: int) -> int:
+        return member_count if self.per_person else self.count
+
+    def covered(self) -> int:
+        return sum(c.count for c in self.contributions)
+
+    def fully_packed(self, member_count: int) -> bool:
+        return (
+            bool(self.contributions)
+            and self.covered() >= self.target(member_count)
+            and all(c.packed for c in self.contributions)
+        )
 
 
 class Trip(Entity):
@@ -123,6 +153,7 @@ class SupplyIn(BaseModel):
     display_name: str
     default_category_id: str = UNCATEGORIZED_ID
     default_count: int = Field(default=1, ge=1)
+    per_person: bool = False
     notes: str = ""
 
 
@@ -130,6 +161,7 @@ class SupplyPatch(BaseModel):
     display_name: str | None = None
     default_category_id: str | None = None
     default_count: int | None = Field(default=None, ge=1)
+    per_person: bool | None = None
     notes: str | None = None
     archived: bool | None = None
 
@@ -166,8 +198,8 @@ class TripPatch(BaseModel):
 class CloneIn(BaseModel):
     display_name: str
     keep_members: bool = True
-    keep_owners: bool = False
-    reset_status_to_needed: bool = False
+    keep_owners: bool = False  # keep who brings what (requires keep_members)
+    reset_status_to_needed: bool = False  # for kept contributions
 
 
 class TripCategoryIn(BaseModel):
@@ -184,8 +216,9 @@ class ItemIn(BaseModel):
     new_name: str | None = None
     category_id: str | None = None
     count: int | None = Field(default=None, ge=1)
-    status: Status = Status.NEEDED
-    owner_id: str | None = None
+    per_person: bool | None = None  # None = the supply's default
+    owner_id: str | None = None  # claims the whole item for this person
+    status: Status = Status.NEEDED  # of the owner's contribution
     before_id: str | None = None  # item to land in front of; None = end of the card
 
 
@@ -202,8 +235,18 @@ class CategoryMoveIn(BaseModel):
 
 class ItemPatch(BaseModel):
     count: int | None = Field(default=None, ge=1)
-    status: Status | None = None
-    packed: bool | None = None
-    owner_id: str | None = None
+    per_person: bool | None = None
     category_id: str | None = None
     notes: str | None = None
+    status: Status | None = None  # applied to every contribution
+    packed: bool | None = None  # applied to every contribution
+    contributions: list[Contribution] | None = None  # replaces them all
+
+
+class ContributionPatch(BaseModel):
+    """Create or change one person's contribution. Unset fields keep their value
+    (or a default: the remaining count, or 1 for a per-person item)."""
+
+    count: int | None = Field(default=None, ge=1)
+    status: Status | None = None
+    packed: bool | None = None
