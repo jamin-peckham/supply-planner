@@ -1,6 +1,7 @@
 // Main screen: the open trip as a grid of category cards.
 // Cards and items each show two direct controls (select checkbox, remove). An item's
-// chips are the people bringing it: tap one to pack it, + to claim it yourself.
+// chips are the people bringing it: tap one to step it from still-to-get to has-it to
+// packed, + to claim it yourself.
 // Selected items get bulk actions (pack, owned, assign…) from the bar at the bottom;
 // everything else lives in the right-click menu or the edit modal.
 import { addToTrip, cloneFrom, createEntity, editEntity, removeEntity, saveAsSet, tripCall } from './actions.js';
@@ -108,12 +109,18 @@ function headerHtml(trip) {
 const MAX_CHIPS = 3;
 
 const STATE_TEXT = { packed: 'packed', owned: 'has it', needed: 'still has to get it' };
+// Tapping a chip steps it along: still to get → has it → packed → back to still to get.
+const NEXT_STATE = {
+  needed: { label: 'mark as has it', body: { status: 'owned' } },
+  owned: { label: 'mark packed', body: { packed: true } },
+  packed: { label: 'start over (still to get)', body: { status: 'needed' } }, // needing it unpacks it
+};
 
 function chipHtml(item, c) {
   const who = store.name('users', c.owner_id);
   const state = c.packed ? 'packed' : c.status;
   const n = c.count > 1 && !item.per_person ? `<span class="chip-n">×${c.count}</span>` : '';
-  const title = `${who}${c.count > 1 ? ` ×${c.count}` : ''}: ${STATE_TEXT[state]}. Tap to ${c.packed ? 'unpack' : 'pack'}.`;
+  const title = `${who}${c.count > 1 ? ` ×${c.count}` : ''}: ${STATE_TEXT[state]}. Tap to ${NEXT_STATE[state].label}.`;
   return `<button type="button" class="chip chip-${state}${c.owner_id === me() ? ' is-me' : ''}" data-act="chip" data-user="${c.owner_id}"
     title="${esc(title)}" aria-label="${esc(title)}">${esc(initials(who))}${n}${c.packed ? '<i class="bi bi-check-lg"></i>' : ''}</button>`;
 }
@@ -566,9 +573,9 @@ async function askCount(item, userId, value) {
   });
 }
 
-function toggleChip(item, userId) {
+function cycleChip(item, userId) {
   const c = contributionOf(item, userId);
-  if (c) return tripCall('put', claimPath(item, userId), { packed: !c.packed });
+  if (c) return tripCall('put', claimPath(item, userId), NEXT_STATE[c.packed ? 'packed' : c.status].body);
 }
 
 function chipMenu(e, item, userId) {
@@ -577,7 +584,7 @@ function chipMenu(e, item, userId) {
   const who = userId === me() ? 'You' : store.name('users', userId);
   showContextMenu(e, [
     { header: `${who}${c.count > 1 ? ` ×${c.count}` : ''}` },
-    { label: c.packed ? 'Unpack' : 'Pack', icon: c.packed ? 'bi-square' : 'bi-check2-square', action: () => toggleChip(item, userId) },
+    { label: c.packed ? 'Unpack' : 'Pack', icon: c.packed ? 'bi-square' : 'bi-check2-square', action: () => tripCall('put', claimPath(item, userId), { packed: !c.packed }) },
     {
       label: c.status === 'needed' ? 'Mark owned' : 'Mark needed (still to get)',
       icon: c.status === 'needed' ? 'bi-bag-check' : 'bi-bag',
@@ -674,7 +681,7 @@ export function initBoard() {
       case 'edit-item': {
         const item = findItem(itemEl.dataset.dragId);
         if (!item) return;
-        if (act === 'chip') return toggleChip(item, el.dataset.user);
+        if (act === 'chip') return cycleChip(item, el.dataset.user);
         if (act === 'slot') return tripCall('put', claimPath(item, el.dataset.user), {});
         if (act === 'claim') return claim(el, item);
         return openEditor(item);

@@ -32,7 +32,7 @@ A collaborative trip supply planner. Build a **library** of reusable building bl
 - **Right-click** any entry, card or item for more actions: edit, claim, owned/needed, remove, and template actions. A card's **Update library defaults** makes that category the default for the supplies on it, so the library learns from how trips are organized.
 - **Cards and items** have a select checkbox and a remove button. Cards pack upward to fill gaps, masonry style.
 - **Who brings what:** each item shows how much is claimed (`4/6`, amber while short) and a chip per person bringing it. A dashed amber chip means they still have to get it, a solid one that they have it, and a green one with a check that it's packed. Packing implies having it.
-  - **Tap a chip** to pack or unpack it. Right-click (or long-press) a chip to mark it owned/needed, change the count or remove the claim.
+  - **Tap a chip** to move it along: still to get → has it → packed → back to still to get. Right-click (or long-press) a chip to jump straight to a state, change the count or remove the claim.
   - **+** claims the item for you. If several are still missing, it asks how many and defaults to all of them.
   - **One-per-person items** show an empty dashed slot for every member who hasn't claimed theirs. Tap a slot to claim it. New members get a slot automatically.
   - **Edit** (double-click or right-click) lists everyone bringing the item, with counts, status and packed, and switches between a fixed count and one per person.
