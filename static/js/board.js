@@ -1,7 +1,9 @@
 // Main screen: the open trip as a grid of category cards.
-// Cards and items each show two direct controls (packed toggle, remove);
+// Cards and items each show two direct controls (select checkbox, remove). Selected
+// items get bulk actions (pack, owned, assign…) from the bar at the bottom;
 // everything else lives in the right-click menu or the edit modal.
 import { addToTrip, cloneFrom, createEntity, editEntity, removeEntity, saveAsSet, tripCall } from './actions.js';
+import { api } from './api.js';
 import { showContextMenu } from './contextMenu.js';
 import { dropZone, makeDraggable } from './dnd.js';
 import { confirmDialog, editItem, editTrip, formModal } from './modals.js';
@@ -19,6 +21,11 @@ if (!FILTERS[filter]) filter = 'all';
 
 const board = () => document.getElementById('board');
 const findItem = (id) => store.trip?.items.find((i) => i.id === id);
+
+// Selected item ids. Local to this browser; cleared when another trip opens.
+const selected = new Set();
+let selectionTripId = null;
+let anchorId = null; // last clicked item, for shift-click ranges
 
 // --- Rendering -----------------------------------------------------------------
 
@@ -93,11 +100,13 @@ function itemHtml(item) {
   const supply = store.maps.supplies.get(item.supply_id);
   const name = supply?.display_name ?? '(deleted supply)';
   return `<li class="item${item.packed ? ' is-packed' : ''}" draggable="true" data-drag-type="item" data-drag-id="${item.id}" data-drag-name="${esc(name)}">
-    <input class="form-check-input mt-0" type="checkbox" data-act="pack-item"${item.packed ? ' checked' : ''} aria-label="Packed">
+    <input class="form-check-input mt-0" type="checkbox" data-act="select-item" aria-label="Select ${esc(name)}">
     <span class="item-name" title="${esc(item.notes || name)}">${esc(name)}</span>
+    ${item.packed ? '<i class="bi bi-check2 item-packed-icon" title="Packed"></i>' : ''}
     ${item.count > 1 ? `<span class="item-count">×${item.count}</span>` : ''}
     <span class="item-meta">
-      <span class="status-badge status-${item.status}">${item.status}</span>
+      <button type="button" class="status-badge status-${item.status}" data-act="toggle-status"
+        title="Mark ${item.status === 'needed' ? 'owned' : 'needed'}">${item.status}</button>
       ${owner ? `<span class="avatar avatar-sm${mine ? ' is-me' : ''}" title="${esc(owner)}">${esc(initials(owner))}</span>` : ''}
     </span>
     <button type="button" class="btn btn-icon" data-act="remove-item" title="Remove from trip" aria-label="Remove ${esc(name)}"><i class="bi bi-x-lg"></i></button>
@@ -115,34 +124,163 @@ function cardHtml(trip, categoryId) {
     : `<li class="item-empty">${all.length ? 'No items match the filter' : 'Drop supplies here'}</li>`;
   return `<article class="card cat-card${allPacked ? ' is-packed' : ''}" data-category-id="${categoryId}">
     <div class="card-header">
+      <input class="form-check-input mt-0" type="checkbox" data-act="select-cat" ${shown.length ? '' : 'disabled'}
+        title="Select all" aria-label="Select all in ${esc(name)}">
       <span class="cat-name">${esc(name)}</span>
-      <span class="cat-progress">${packed}/${all.length}</span>
-      <button type="button" class="btn btn-icon" data-act="pack-cat" ${all.length ? '' : 'disabled'}
-        title="${allPacked ? 'Unpack all' : 'Pack all'}" aria-pressed="${allPacked}" aria-label="${allPacked ? 'Unpack' : 'Pack'} all in ${esc(name)}">
-        <i class="bi ${allPacked ? 'bi-check2-square' : 'bi-square'}"></i></button>
+      <span class="cat-progress" title="Packed">${packed}/${all.length}</span>
       <button type="button" class="btn btn-icon" data-act="remove-cat" title="Remove from trip" aria-label="Remove ${esc(name)} from trip"><i class="bi bi-x-lg"></i></button>
     </div>
     <ul class="items">${body}</ul>
     <form class="quick-add" data-act="quick-add">
-      <input class="form-control form-control-sm" list="supplyOptions" placeholder="Add supply…" aria-label="Add supply to ${esc(name)}">
+      <input class="form-control form-control-sm" list="supplyOptions-${categoryId}" placeholder="Add supply…" aria-label="Add supply to ${esc(name)}">
+      <datalist id="supplyOptions-${categoryId}">${supplyOptions(categoryId)}</datalist>
     </form>
   </article>`;
 }
 
-function tripHtml(trip) {
-  const options = store.supplies
-    .filter((s) => !s.archived)
+/** Autocomplete for a card's quick-add: library supplies whose default category is this one. */
+function supplyOptions(categoryId) {
+  return store.supplies
+    .filter((s) => !s.archived && s.default_category_id === categoryId)
     .map((s) => `<option value="${esc(s.display_name)}"></option>`)
     .join('');
+}
+
+function tripHtml(trip) {
   const cards = trip.category_ids.map((c) => cardHtml(trip, c)).join('');
   return `${headerHtml(trip)}
-    <datalist id="supplyOptions">${options}</datalist>
     <div class="board-grid">${cards}
       <div class="add-card" data-act="add-category" role="button" tabindex="0">
         <i class="bi bi-plus-lg"></i><span>Add category</span>
         <small>or drag categories, supplies and sets here</small>
       </div>
-    </div>`;
+    </div>
+    <div class="bulk-bar" role="toolbar" aria-label="Selected items" hidden></div>`;
+}
+
+// --- Masonry layout ----------------------------------------------------------------
+
+// Rows are 1px tall (see .is-masonry), so a card's span is its height plus the gap.
+const masonryObserver = new ResizeObserver((entries) => {
+  for (const { target } of entries) layoutCard(target);
+});
+
+function layoutCard(el) {
+  const grid = el.parentElement;
+  if (!grid) return;
+  const gap = parseFloat(getComputedStyle(grid).columnGap) || 0;
+  el.style.gridRowEnd = `span ${Math.ceil(el.getBoundingClientRect().height + gap)}`;
+}
+
+function initMasonry(grid) {
+  masonryObserver.disconnect();
+  grid.classList.add('is-masonry');
+  for (const el of grid.children) masonryObserver.observe(el);
+}
+
+// --- Selection -------------------------------------------------------------------
+
+function selectedItems() {
+  return store.trip ? store.trip.items.filter((i) => selected.has(i.id)) : [];
+}
+
+function bulkBarHtml(items) {
+  const n = items.length;
+  const btn = (act, icon, label, disabled = false, cls = 'btn-outline-secondary') =>
+    `<button type="button" class="btn btn-sm ${cls}" data-act="${act}"${disabled ? ' disabled' : ''}><i class="bi ${icon}"></i><span>${label}</span></button>`;
+  return `<span class="bulk-count"><strong>${n}</strong> selected</span>
+    <div class="bulk-actions">
+      ${btn('bulk-pack', 'bi-check2-square', 'Packed', items.every((i) => i.packed))}
+      ${btn('bulk-unpack', 'bi-square', 'Unpacked', items.every((i) => !i.packed))}
+      ${btn('bulk-owned', 'bi-bag-check', 'Owned', items.every((i) => i.status === 'owned'))}
+      ${btn('bulk-needed', 'bi-bag', 'Needed', items.every((i) => i.status === 'needed'))}
+      ${btn('bulk-assign', 'bi-person', 'Assign to…')}
+      ${btn('bulk-remove', 'bi-trash', 'Remove', false, 'btn-outline-danger')}
+    </div>
+    <button type="button" class="btn btn-icon ms-auto" data-act="bulk-clear" title="Clear selection (Esc)" aria-label="Clear selection"><i class="bi bi-x-lg"></i></button>`;
+}
+
+/** Reflect `selected` in the DOM without a full re-render (keeps focus and scroll). */
+function syncSelection() {
+  const root = board();
+  root.querySelectorAll('.item[data-drag-id]').forEach((el) => {
+    const on = selected.has(el.dataset.dragId);
+    el.classList.toggle('is-selected', on);
+    el.querySelector('[data-act="select-item"]').checked = on;
+  });
+  root.querySelectorAll('.cat-card').forEach((card) => {
+    const boxes = [...card.querySelectorAll('[data-act="select-item"]')];
+    const on = boxes.filter((b) => b.checked).length;
+    const all = card.querySelector('[data-act="select-cat"]');
+    all.checked = boxes.length > 0 && on === boxes.length;
+    all.indeterminate = on > 0 && on < boxes.length;
+  });
+  const bar = root.querySelector('.bulk-bar');
+  if (!bar) return;
+  const items = selectedItems();
+  bar.hidden = !items.length;
+  root.classList.toggle('has-selection', items.length > 0);
+  bar.innerHTML = items.length ? bulkBarHtml(items) : '';
+}
+
+/** Ids of the items currently shown on the board, in screen order. */
+const visibleIds = () => [...board().querySelectorAll('.item[data-drag-id]')].map((el) => el.dataset.dragId);
+
+function toggleItem(id, { range = false } = {}) {
+  const on = !selected.has(id);
+  const ids = visibleIds();
+  const from = ids.indexOf(anchorId);
+  const to = ids.indexOf(id);
+  const span = range && from >= 0 && to >= 0 ? ids.slice(Math.min(from, to), Math.max(from, to) + 1) : [id];
+  for (const x of span) on ? selected.add(x) : selected.delete(x);
+  anchorId = id;
+  syncSelection();
+}
+
+function toggleCategory(card) {
+  const ids = [...card.querySelectorAll('.item[data-drag-id]')].map((el) => el.dataset.dragId);
+  const allOn = ids.every((id) => selected.has(id));
+  for (const id of ids) allOn ? selected.delete(id) : selected.add(id);
+  syncSelection();
+}
+
+function clearSelection() {
+  selected.clear();
+  anchorId = null;
+  syncSelection();
+}
+
+/** Apply one change to many items, then refetch the trip once. */
+async function bulkApply(ids, request) {
+  if (!ids.length || !store.trip) return;
+  const tripId = store.trip.id;
+  await Promise.allSettled(ids.map((id) => request(`/trips/${tripId}/items/${id}`)));
+  store.setTrip(await api.get(`/trips/${tripId}`));
+}
+
+const bulkPatch = (body) => bulkApply([...selected], (path) => api.patch(path, body));
+
+async function bulkRemove() {
+  const ids = [...selected];
+  if (!(await confirmDialog(`Remove ${ids.length} item${ids.length === 1 ? '' : 's'} from this trip?`))) return;
+  await bulkApply(ids, (path) => api.del(path));
+  clearSelection();
+}
+
+function assignMenu(anchor) {
+  const trip = store.trip;
+  const me = store.currentUserId;
+  const assign = (owner_id) => () => bulkPatch({ owner_id });
+  const others = store.users.filter((u) => !trip.member_ids.includes(u.id));
+  showContextMenu(anchor, [
+    ...(me ? [{ label: `Me (${store.name('users', me)})`, icon: 'bi-person-check', action: assign(me) }, 'divider'] : []),
+    ...(trip.member_ids.length ? [{ header: 'Members' }] : []),
+    ...trip.member_ids.filter((id) => id !== me).map((id) => ({ label: store.name('users', id), icon: 'bi-person', action: assign(id) })),
+    ...(others.length ? [{ header: 'Others (joins the trip)' }] : []),
+    ...others.filter((u) => u.id !== me).map((u) => ({ label: u.display_name, icon: 'bi-person-plus', action: assign(u.id) })),
+    'divider',
+    { label: 'Unassigned', icon: 'bi-person-dash', action: assign(null) },
+  ]);
 }
 
 export function renderBoard() {
@@ -155,20 +293,37 @@ export function renderBoard() {
       : null;
 
   const trip = store.trip;
+  if (trip?.id !== selectionTripId) {
+    selected.clear();
+    anchorId = null;
+    selectionTripId = trip?.id ?? null;
+  }
   root.innerHTML = trip ? tripHtml(trip) : emptyState();
+  root.classList.remove('has-selection');
   document.title = trip ? `${trip.display_name} · Supply Planner` : 'Supply Planner';
-  if (!trip) return;
+  if (!trip) {
+    masonryObserver.disconnect();
+    return;
+  }
+  initMasonry(root.querySelector('.board-grid'));
 
   root.querySelectorAll('.cat-card').forEach((card) => {
     const categoryId = card.dataset.categoryId;
+    // Dragging a selected item moves the whole selection.
+    const moving = (p) => (selected.has(p.id) ? [...selected] : [p.id]).filter((id) => findItem(id)?.category_id !== categoryId);
     dropZone(card, {
-      accepts: (p) => p.type === 'supply' || (p.type === 'item' && findItem(p.id)?.category_id !== categoryId),
+      accepts: (p) => p.type === 'supply' || (p.type === 'item' && moving(p).length > 0),
       onDrop: (p) =>
         p.type === 'supply'
           ? addToTrip('supply', p.id, { categoryId })
-          : tripCall('patch', `/items/${p.id}`, { category_id: categoryId }),
+          : bulkApply(moving(p), (path) => api.patch(path, { category_id: categoryId })),
     });
   });
+
+  // Drop selected ids that are gone or hidden by the filter.
+  const shown = new Set(visibleIds());
+  for (const id of selected) if (!shown.has(id)) selected.delete(id);
+  syncSelection();
 
   if (keep) {
     const input = root.querySelector(`.cat-card[data-category-id="${keep.cat}"] .quick-add input`);
@@ -296,7 +451,12 @@ export function initBoard() {
 
   root.addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]');
-    if (!el) return;
+    if (!el) {
+      // Clicking anywhere else on an item row toggles its selection.
+      const row = e.target.closest('.item[data-drag-id]');
+      if (row) toggleItem(row.dataset.dragId, { range: e.shiftKey });
+      return;
+    }
     const act = el.dataset.act;
     const itemEl = el.closest('.item');
     const cardEl = el.closest('.cat-card');
@@ -317,12 +477,31 @@ export function initBoard() {
         return addToTrip('user', store.currentUserId);
       case 'remove-member':
         return removeMember(el.dataset.id);
-      case 'pack-item':
-        return tripCall('patch', `/items/${itemEl.dataset.dragId}`, { packed: el.checked });
+      case 'select-item':
+        return toggleItem(itemEl.dataset.dragId, { range: e.shiftKey });
+      case 'select-cat':
+        return toggleCategory(cardEl);
+      case 'toggle-status': {
+        const item = findItem(itemEl.dataset.dragId);
+        if (!item) return;
+        return tripCall('patch', `/items/${item.id}`, { status: item.status === 'needed' ? 'owned' : 'needed' });
+      }
       case 'remove-item':
         return tripCall('del', `/items/${itemEl.dataset.dragId}`);
-      case 'pack-cat':
-        return setCategoryPacked(cardEl.dataset.categoryId);
+      case 'bulk-pack':
+        return bulkPatch({ packed: true });
+      case 'bulk-unpack':
+        return bulkPatch({ packed: false });
+      case 'bulk-owned':
+        return bulkPatch({ status: 'owned' });
+      case 'bulk-needed':
+        return bulkPatch({ status: 'needed' });
+      case 'bulk-assign':
+        return assignMenu(el);
+      case 'bulk-remove':
+        return bulkRemove();
+      case 'bulk-clear':
+        return clearSelection();
       case 'remove-cat':
         return removeCategory(cardEl.dataset.categoryId);
       case 'add-category':
@@ -332,6 +511,11 @@ export function initBoard() {
   root.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.target.matches('.add-card')) addCategoryPrompt();
   });
+  document.addEventListener('keydown', (e) => {
+    const typing = e.target.closest?.('input:not([type=checkbox]), textarea, select');
+    const menuOpen = document.getElementById('ctxMenu').classList.contains('show');
+    if (e.key === 'Escape' && selected.size && !typing && !menuOpen && !document.querySelector('.modal.show')) clearSelection();
+  }, true); // capture: run before the context menu closes itself on the same Escape
   root.addEventListener('submit', (e) => {
     const form = e.target.closest('.quick-add');
     if (!form) return;

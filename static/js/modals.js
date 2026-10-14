@@ -140,7 +140,7 @@ export function editCategory(category = null) {
   });
 }
 
-export function editSupply(supply = null) {
+export function editSupply(supply = null, preset = {}) {
   return formModal({
     title: supply ? `Edit ${supply.display_name}` : 'New supply',
     submitLabel: supply ? 'Save' : 'Create',
@@ -151,7 +151,7 @@ export function editSupply(supply = null) {
         label: 'Default category',
         type: 'select',
         options: categoryOptions(),
-        value: supply?.default_category_id ?? UNCATEGORIZED_ID,
+        value: supply?.default_category_id ?? preset.default_category_id ?? UNCATEGORIZED_ID,
         help: 'Used when the supply is added to a trip without picking a category.',
       },
       { name: 'default_count', label: 'Default count', type: 'number', min: 1, value: supply?.default_count ?? 1, required: true },

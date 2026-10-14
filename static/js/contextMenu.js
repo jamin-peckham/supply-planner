@@ -13,7 +13,7 @@ function close() {
 }
 
 /**
- * items: [{ label, icon, action, danger, disabled }] or 'divider'.
+ * items: [{ label, icon, action, danger, disabled }], { header } or 'divider'.
  * Accepts a mouse event (positions at the pointer) or an element (positions under it).
  */
 export function showContextMenu(anchor, items) {
@@ -22,6 +22,7 @@ export function showContextMenu(anchor, items) {
   menu.innerHTML = items
     .map((it, i) => {
       if (it === 'divider') return '<li><hr class="dropdown-divider"></li>';
+      if (it.header) return `<li><h6 class="dropdown-header">${esc(it.header)}</h6></li>`;
       const cls = `dropdown-item${it.danger ? ' text-danger' : ''}${it.disabled ? ' disabled' : ''}`;
       const icon = it.icon ? `<i class="bi ${it.icon} me-2"></i>` : '';
       return `<li><button type="button" class="${cls}" data-index="${i}">${icon}${esc(it.label)}</button></li>`;

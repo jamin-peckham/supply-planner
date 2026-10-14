@@ -104,6 +104,7 @@ body {
 }
 
 .lib-chevron {
+  display: inline-block;
   font-size: 0.75rem;
   transition: transform 0.15s ease;
 }
@@ -172,6 +173,44 @@ body {
 .lib-entry-sub {
   color: var(--bs-secondary-color);
   font-size: 0.75rem;
+}
+
+.lib-section[data-section="category"] .lib-list {
+  max-height: 60vh;
+}
+
+.lib-cat-row {
+  display: flex;
+  align-items: center;
+}
+
+.lib-cat-row .lib-entry {
+  flex: 1;
+  min-width: 0;
+  padding-left: 0.15rem;
+}
+
+.lib-cat-row .lib-entry-name {
+  font-weight: 600;
+}
+
+.lib-cat-toggle {
+  --bs-btn-padding-x: 0.25rem;
+}
+
+.lib-cat-toggle:disabled .lib-chevron {
+  visibility: hidden;
+}
+
+.lib-cat-toggle[aria-expanded="true"] .lib-chevron {
+  transform: rotate(90deg);
+}
+
+.lib-sublist {
+  list-style: none;
+  margin: 0 0 0.25rem 1.1rem;
+  padding: 0 0 0 0.35rem;
+  border-left: 1px solid var(--bs-border-color-translucent);
 }
 
 .lib-empty {
@@ -268,6 +307,13 @@ body {
   align-items: start;
 }
 
+/* Masonry: board.js sets each card's row span to its height, so cards pack
+   upward into the gaps instead of lining up in rows. */
+.board-grid.is-masonry {
+  grid-auto-rows: 1px;
+  row-gap: 0;
+}
+
 .cat-card {
   border-radius: var(--sp-radius);
   transition: box-shadow 0.15s ease, border-color 0.15s ease;
@@ -315,8 +361,20 @@ body {
   cursor: grab;
 }
 
+.item {
+  user-select: none;
+}
+
 .item:hover {
   background: var(--bs-tertiary-bg);
+}
+
+.item.is-selected {
+  background: var(--bs-primary-bg-subtle);
+}
+
+.item-packed-icon {
+  color: var(--bs-success);
 }
 
 .item-name {
@@ -345,12 +403,17 @@ body {
 }
 
 .status-badge {
+  cursor: pointer;
   font-size: 0.65rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding: 0.1rem 0.35rem;
   border-radius: 0.25rem;
   border: 1px solid;
+}
+
+.status-badge:hover {
+  filter: brightness(0.92);
 }
 
 .status-needed {
@@ -400,6 +463,44 @@ body {
 
 .add-card .bi {
   font-size: 1.5rem;
+}
+
+/* --- Bulk actions for selected items --------------------------------------- */
+
+.bulk-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-primary-border-subtle);
+  border-radius: var(--sp-radius);
+  box-shadow: 0 0.25rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+.bulk-bar[hidden] {
+  display: none;
+}
+
+.bulk-count {
+  white-space: nowrap;
+}
+
+.bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.bulk-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
 }
 
 /* --- Drag and drop -------------------------------------------------------- */

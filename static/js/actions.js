@@ -23,8 +23,9 @@ function requireTrip() {
   return store.trip;
 }
 
-export async function createEntity(type) {
-  const created = await TYPES[type].edit();
+/** `preset` pre-fills the form, e.g. a supply's default category. */
+export async function createEntity(type, preset) {
+  const created = await TYPES[type].edit(null, preset);
   if (!created) return;
   await store.loadAll();
   if (type === 'trip') store.openTrip(created.id);
@@ -107,6 +108,13 @@ export function entityMenu(type, id) {
       { label: 'Use as template…', icon: 'bi-copy', action: () => cloneFrom(obj) },
       { label: 'Save as standard set…', icon: 'bi-collection', action: () => saveAsSet(obj) },
     );
+  }
+  if (type === 'category') {
+    items.push({
+      label: 'New supply in this category…',
+      icon: 'bi-backpack',
+      action: () => createEntity('supply', { default_category_id: id }),
+    });
   }
   if (type === 'user') {
     items.push({
