@@ -50,3 +50,27 @@ def test_delete_used_supply_archives_it(client, make):
     # re-adding by name un-archives
     client.post(f"/api/trips/{t['id']}/items", json={"new_name": "Stove"})
     assert client.get("/api/supplies").json()[0]["id"] == s["id"]
+
+
+def test_legacy_trip_items_migrate_to_contributions():
+    from app.models import Trip
+
+    a, b = "user-a", "user-b"
+    legacy = {
+        "display_name": "Old",
+        "member_ids": [a, b],
+        "items": [
+            {"id": "1", "supply_id": "stove", "category_id": "c", "count": 1, "status": "owned", "packed": True, "owner_id": a},
+            {"id": "2", "supply_id": "stove", "category_id": "c", "count": 2, "status": "needed", "packed": False, "owner_id": b},
+            {"id": "3", "supply_id": "tent", "category_id": "c", "count": 1, "status": "owned", "packed": False, "owner_id": None},
+            {"id": "4", "supply_id": "rope", "category_id": "c", "count": 1, "status": "needed", "packed": False, "owner_id": None},
+            {"id": "5", "supply_id": "rope", "category_id": "d", "count": 1, "status": "needed", "packed": False, "owner_id": None},
+        ],
+    }
+    trip = Trip.model_validate(legacy)
+    stove, tent, rope, rope2 = trip.items
+    assert (stove.id, stove.count) == ("1", 3)  # duplicate rows merge; the target is their total
+    assert [(c.owner_id, c.count, c.status, c.packed) for c in stove.contributions] == [(a, 1, "owned", True), (b, 2, "needed", False)]
+    assert [(c.owner_id, c.status) for c in tent.contributions] == [(a, "owned")]  # unowned but owned → first member
+    assert rope.contributions == [] and rope2.category_id == "d"  # other card stays separate
+    assert Trip.model_validate(trip.model_dump()) == trip  # idempotent

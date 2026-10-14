@@ -8,9 +8,10 @@ Two layers:
 
 from datetime import date
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 UNCATEGORIZED_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -124,6 +125,53 @@ class Trip(Entity):
     items: list[TripItem] = Field(default_factory=list)
     version: int = 0
     template_source_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_items(cls, data: Any) -> Any:
+        """Convert trips saved before v0.7, whose items had one owner_id/status/packed each.
+
+        An owned item becomes that owner's contribution. An unowned item that was marked
+        owned or packed goes to the trip's first member, so nothing is lost. Rows for the
+        same supply on the same card (the old way to split an item) merge into one item.
+        The converted trip is written back on its next save.
+        """
+        if not isinstance(data, dict):
+            return data
+        items = data.get("items") or []
+        if not any(isinstance(i, dict) and "contributions" not in i for i in items):
+            return data
+        members = data.get("member_ids") or []
+        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        for raw in items:
+            item = dict(raw)
+            if "contributions" not in item:
+                owner = item.pop("owner_id", None)
+                status = item.pop("status", Status.NEEDED)
+                packed = item.pop("packed", False)
+                if owner is None and (packed or status == Status.OWNED) and members:
+                    owner = members[0]
+                item["contributions"] = (
+                    [{"owner_id": owner, "count": item.get("count", 1), "status": Status.OWNED if packed else status, "packed": packed}]
+                    if owner
+                    else []
+                )
+            key = (item.get("supply_id"), item.get("category_id"))
+            if key not in merged:
+                merged[key] = item
+                continue
+            first = merged[key]
+            first["count"] = first.get("count", 1) + item.get("count", 1)
+            for c in item["contributions"]:
+                same = next((x for x in first["contributions"] if x["owner_id"] == c["owner_id"]), None)
+                if same is None:
+                    first["contributions"].append(c)
+                else:
+                    same["count"] += c["count"]
+                    same["packed"] = same["packed"] and c["packed"]
+                    if c["status"] == Status.NEEDED:
+                        same["status"] = Status.NEEDED
+        return {**data, "items": list(merged.values())}
 
 
 # --- Request bodies ----------------------------------------------------------
